@@ -26,28 +26,49 @@
 
 #import <AppKit/AppKit.h>
 #import <dispatch/dispatch.h>
-#import <pthread.h>
 #include <string.h>
 
 #include "cocoa_darwin.h"
 
+// cfOnMainThread answers "am I on the thread AppKit wants", which is the
+// process's main thread — thread 0, the one go-gui pins the Go main goroutine
+// to. [NSThread isMainThread] is used rather than pthread_main_np() because it
+// comes from Foundation, which this file already depends on for everything
+// else, instead of from a libc declaration whose visibility depends on
+// __DARWIN_C_LEVEL.
 int cfOnMainThread(void) {
-    return pthread_main_np() ? 1 : 0;
+    return [NSThread isMainThread] ? 1 : 0;
 }
 
-// cfRunOnMain runs a block on thread 0, inline when the caller is already there
-// — dispatch_sync onto the queue you are already on deadlocks.
+// cfRunOnMain runs a block on the main thread, inline when the caller is already
+// there — dispatch_sync onto the queue you are already on deadlocks.
 //
 // The NSApp==nil case is not a shortcut: with no application object there is no
 // window list to read, so the block's own nil checks already produce the right
 // answer, and hopping would hang a headless run (--dump, --render) where no run
 // loop is running to service the main queue.
 static void cfRunOnMain(void (^block)(void)) {
-    if (pthread_main_np() || NSApp == nil) {
+    if (cfOnMainThread() || NSApp == nil) {
         block();
         return;
     }
     dispatch_sync(dispatch_get_main_queue(), block);
+}
+
+// cfWindowFromHandle turns the uintptr_t handle the Go side passes around back
+// into an NSWindow.
+//
+// The double cast is required rather than stylistic: __bridge only converts
+// between Objective-C and Core Foundation types, so an integer has to become a
+// void * on the way. `(__bridge NSWindow *)win` is a compile error under ARC —
+// "incompatible types casting 'uintptr_t' to 'NSWindow *' with a __bridge
+// cast".
+//
+// The result is not retained. AppKit owns the window and outlives our use of
+// the handle; the mutation blocks below capture it strongly for their own
+// duration.
+static NSWindow *cfWindowFromHandle(uintptr_t win) {
+    return (__bridge NSWindow *)(void *)win;
 }
 
 // --- Window lookup ---
@@ -106,7 +127,7 @@ int cfWindowIsAlive(uintptr_t win) {
         // Membership rather than a bare pointer test: a destroyed window leaves
         // the address free for reuse, and a stale handle must not be mistaken
         // for a live one.
-        NSWindow *want = (__bridge NSWindow *)win;
+        NSWindow *want = cfWindowFromHandle(win);
         for (NSWindow *w in windows) {
             if (w == want) {
                 alive = 1;
@@ -123,7 +144,7 @@ int cfWindowIsVisible(uintptr_t win) {
     }
     __block int visible = 0;
     cfRunOnMain(^{
-        NSWindow *w = (__bridge NSWindow *)win;
+        NSWindow *w = cfWindowFromHandle(win);
         visible = [w isVisible] ? 1 : 0;
     });
     return visible;
@@ -196,7 +217,7 @@ void cfWindowFrame(uintptr_t win, double *out) {
         return;
     }
     cfRunOnMain(^{
-        NSRect f = [(__bridge NSWindow *)win frame];
+        NSRect f = [cfWindowFromHandle(win) frame];
         out[0] = f.origin.x;
         out[1] = f.origin.y;
         out[2] = f.size.width;
@@ -214,7 +235,7 @@ void cfWindowSetFrame(uintptr_t win, double x, double y, double w, double h) {
     if (win == 0) {
         return;
     }
-    NSWindow *target = (__bridge NSWindow *)win;
+    NSWindow *target = cfWindowFromHandle(win);
     dispatch_async(dispatch_get_main_queue(), ^{
         [target setFrame:NSMakeRect(x, y, w, h) display:YES];
     });
@@ -224,7 +245,7 @@ void cfWindowSetLevel(uintptr_t win, int floating) {
     if (win == 0) {
         return;
     }
-    NSWindow *target = (__bridge NSWindow *)win;
+    NSWindow *target = cfWindowFromHandle(win);
     dispatch_async(dispatch_get_main_queue(), ^{
         // NSFloatingWindowLevel sits above ordinary windows but below menus and
         // alerts, which is the closest analogue of HWND_TOPMOST: the campfire
@@ -237,7 +258,7 @@ void cfWindowSetIgnoresMouse(uintptr_t win, int ignore) {
     if (win == 0) {
         return;
     }
-    NSWindow *target = (__bridge NSWindow *)win;
+    NSWindow *target = cfWindowFromHandle(win);
     dispatch_async(dispatch_get_main_queue(), ^{
         [target setIgnoresMouseEvents:(ignore ? YES : NO)];
     });
@@ -247,7 +268,7 @@ void cfWindowSetVisible(uintptr_t win, int visible) {
     if (win == 0) {
         return;
     }
-    NSWindow *target = (__bridge NSWindow *)win;
+    NSWindow *target = cfWindowFromHandle(win);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (visible) {
             // orderFront, not makeKeyAndOrderFront: showing the campfire must
@@ -263,7 +284,7 @@ void cfWindowActivate(uintptr_t win) {
     if (win == 0) {
         return;
     }
-    NSWindow *target = (__bridge NSWindow *)win;
+    NSWindow *target = cfWindowFromHandle(win);
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSApp activateIgnoringOtherApps:YES];
         [target makeKeyAndOrderFront:nil];
@@ -274,7 +295,7 @@ void cfWindowSetOverlayBehavior(uintptr_t win, int overlay) {
     if (win == 0) {
         return;
     }
-    NSWindow *target = (__bridge NSWindow *)win;
+    NSWindow *target = cfWindowFromHandle(win);
     dispatch_async(dispatch_get_main_queue(), ^{
         NSWindowCollectionBehavior b = [target collectionBehavior];
         NSWindowCollectionBehavior flags =

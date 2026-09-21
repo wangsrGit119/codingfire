@@ -4,8 +4,9 @@
 #
 # This is the only automated check of the X11 window layer. The overlay has to
 # find its own window by _NET_WM_PID, apply the EWMH overlay styles to it, and
-# position it — none of which is observable from a compiler. The app logs a
-# warning when the lookup comes back empty, so the log is the assertion.
+# position it — none of which is observable from a compiler. So the log is the
+# assertion, and the assertion is positive: the app announces the placement only
+# after all three have succeeded. See the wait_for_log call below.
 #
 # Run it under a virtual X server:
 #
@@ -113,10 +114,38 @@ fi
 
 echo "window appeared"
 
+# wait_for_log polls for a line rather than grepping once: X11 maps the window
+# during backend New(), before OnInit has run, so the log trails the window by a
+# moment.
+wait_for_log() {
+    local pattern=$1
+    for _ in $(seq 1 80); do
+        grep -q "$pattern" "$log" 2>/dev/null && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+# Positive proof that the window layer engaged, rather than merely that a window
+# exists. This line is written by placeDefault only after it has found our window
+# by _NET_WM_PID, read the work area through RandR, and moved the window with
+# ConfigureWindow — the three things the X11 shim exists to do. A fresh data
+# directory has no saved position, so this path always runs on first launch.
+#
+# It also makes the absence checks below sound: the warning they look for is
+# logged earlier in the same call, so once this line is present any "not found"
+# warning is already in the file. Without it, "the log has no warning in it"
+# would also be satisfied by a log that was never written.
+if ! wait_for_log 'campfire placed at'; then
+    echo "FAIL: the window layer never placed the campfire" >&2
+    dump_log
+    exit 1
+fi
+echo "window layer engaged: $(grep 'campfire placed at' "$log" | tail -1)"
+
 # A window existing is not the same as the app having found it: this is the
-# line applyPlatformTweaks logs when FindOwnWindowByTitle came back empty, which
-# is the one failure a window in the tree does not rule out.
-if grep -q 'campfire window not found' "$log" 2>/dev/null; then
+# line applyPlatformTweaks logs when FindOwnWindowByTitle came back empty.
+if grep -q 'campfire window not found' "$log"; then
     echo "FAIL: the app could not find its own window" >&2
     dump_log
     exit 1
@@ -124,7 +153,7 @@ fi
 
 # The hover card is a second window with its own OnInit; it is parked off-screen
 # rather than closed, so a failure to find it is silent everywhere else.
-if grep -q 'hover card window not found' "$log" 2>/dev/null; then
+if grep -q 'hover card window not found' "$log"; then
     echo "FAIL: the app could not find its hover-card window" >&2
     dump_log
     exit 1
