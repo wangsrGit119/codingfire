@@ -266,18 +266,21 @@ jobs:
           $repo = '${{ github.repository }}'
           $ver = '${{ needs.verify.outputs.version }}'
           $tag = "v$ver"
-          $zips = @(Get-ChildItem -Path assets -Filter *.zip | ForEach-Object { $_.FullName })
+          $zips = @(Get-ChildItem -Path assets -Filter *.zip | Sort-Object Name | ForEach-Object { $_.FullName })
           if ($zips.Count -eq 0) { throw 'no assets were built.' }
           Write-Host "publishing $($zips.Count) asset(s):"
           $zips | ForEach-Object { Write-Host ("  " + (Split-Path $_ -Leaf)) }
 
           # The asset list is generated rather than written out, so the notes can
-          # never advertise a platform that failed to build.
+          # never advertise a platform that failed to build. It is joined into a
+          # single string first: as a bare array element inside the @() literal it
+          # survives as one object and -join renders it as "System.Object[]".
+          $bullets = (($zips | ForEach-Object { '- `' + (Split-Path $_ -Leaf) + '`' }) -join "`n")
           $notes = @(
             'CodingFire - a campfire overlay that shows how hard your local AI tools are working.',
             '',
             'Assets:',
-            ($zips | ForEach-Object { '- `' + (Split-Path $_ -Leaf) + '`' }),
+            $bullets,
             '',
             '**Windows 10 and later, x64, is the supported target.** The Linux and macOS',
             'builds are attached so that platform work has somewhere to land, but the',
