@@ -7,4 +7,4 @@ package core
 // version as a literal anywhere else. Read it through AppInfo.Version /
 // AppInfo.DisplayName. The release script asserts that the binary's
 // self-reported version equals the git tag before packaging.
-const Version = "1.1.0"
+const Version = "1.1.1"
