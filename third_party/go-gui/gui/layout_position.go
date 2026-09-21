@@ -1,0 +1,318 @@
+package gui
+
+// layoutPositions sets positions and handles alignment.
+func layoutPositions(layout *Layout, offsetX, offsetY float32, w *Window) {
+	layoutPositionsDepth(layout, offsetX, offsetY, w, 0)
+}
+
+func layoutPositionsDepth(layout *Layout, offsetX, offsetY float32, w *Window, depth int) {
+	if overMaxDepth(depth) {
+		return
+	}
+	layout.Shape.X += offsetX
+	layout.Shape.Y += offsetY
+
+	axis := layout.Shape.Axis
+	spacing := layout.Shape.Spacing
+
+	if layout.Shape.Scrollable {
+		layout.Shape.Clip = true
+	}
+
+	isRTL := effectiveTextDir(layout.Shape) == TextDirRTL
+
+	x, y := layoutChildStartPos(layout, isRTL, axis, w)
+	layoutW, layoutH := layoutRotatedDims(layout, isRTL && axis == axisLeftToRight, &x, &y)
+	hAlign := resolveHAlign(layout.Shape.HAlign, isRTL)
+	x, y = applyContainerAlignment(layout, hAlign, axis, isRTL, x, y, layoutW, layoutH)
+
+	for i := range layout.Children {
+		child := &layout.Children[i]
+		var xAlign, yAlign float32
+		if axis == axisLeftToRight {
+			yAlign = childCrossAxisVAlign(child, layout.Shape, layoutH)
+		} else {
+			xAlign = childCrossAxisHAlign(child, layout.Shape, hAlign, layoutW)
+		}
+
+		if isRTL && axis == axisLeftToRight {
+			layoutPositionsDepth(child, x-child.Shape.Width+xAlign, y+yAlign, w, depth+1)
+		} else {
+			layoutPositionsDepth(child, x+xAlign, y+yAlign, w, depth+1)
+		}
+
+		// Advance past in-flow children only, the set sizing counted
+		// (skipLayoutChild). A Float left in the tree must not push its
+		// siblings along.
+		if !skipLayoutChild(child.Shape) {
+			switch axis {
+			case axisLeftToRight:
+				if isRTL {
+					x -= child.Shape.Width + spacing
+				} else {
+					x += child.Shape.Width + spacing
+				}
+			case axisTopToBottom:
+				y += child.Shape.Height + spacing
+			}
+		}
+	}
+}
+
+// layoutChildStartPos returns the starting x,y for child positioning,
+// adjusted for text direction, scroll offset, and padding.
+func layoutChildStartPos(
+	layout *Layout, isRTL bool, axis Axis, w *Window,
+) (x, y float32) {
+	if isRTL && axis == axisLeftToRight {
+		x = layout.Shape.X + layout.Shape.Width - layout.Shape.PaddingLeft()
+	} else if isRTL {
+		x = layout.Shape.X + layout.Shape.Padding.Right +
+			layout.Shape.SizeBorder
+	} else {
+		x = layout.Shape.X + layout.Shape.PaddingLeft()
+	}
+	y = layout.Shape.Y + layout.Shape.PaddingTop()
+
+	if layout.Shape.Scrollable {
+		sx := w.scrollX()
+		sy := w.scrollY()
+		id := layout.Shape.idKey()
+		if v, ok := sx.Get(id); ok {
+			// An RTL row starts at the right edge and runs leftward, so the
+			// offset — a distance from that start edge — moves the children
+			// back to the right (scrollMirrorsX). Adding it here pushed the
+			// overflow further off the left, where nothing could reach it.
+			if isRTL && axis == axisLeftToRight {
+				x -= v
+			} else {
+				x += v
+			}
+		}
+		if v, ok := sy.Get(id); ok {
+			y += v
+		}
+	}
+	return x, y
+}
+
+// layoutRotatedDims handles quarter-turn dimension swapping and
+// adjusts x,y to center children in the internal coordinate space.
+// rtlRow is set when x starts at the right edge (an RTL row), where the
+// unrotated frame's right edge is left of the display box's right edge,
+// so the correction is subtracted instead of added.
+func layoutRotatedDims(layout *Layout, rtlRow bool, x, y *float32) (w, h float32) {
+	w = layout.Shape.Width
+	h = layout.Shape.Height
+	turns := layout.Shape.QuarterTurns
+	if turns == 1 || turns == 3 {
+		contentW := h // swapped back
+		contentH := w
+		if rtlRow {
+			*x -= (w - contentW) / 2
+		} else {
+			*x += (w - contentW) / 2
+		}
+		*y += (h - contentH) / 2
+		w = contentW
+		h = contentH
+	}
+	return w, h
+}
+
+// resolveHAlign maps logical start/end alignment to physical
+// left/right based on text direction.
+func resolveHAlign(hAlign HorizontalAlign, isRTL bool) HorizontalAlign {
+	switch hAlign {
+	case HAlignStart:
+		if isRTL {
+			return HAlignRight
+		}
+		return HAlignLeft
+	case HAlignEnd:
+		if isRTL {
+			return HAlignLeft
+		}
+		return HAlignRight
+	default:
+		return hAlign
+	}
+}
+
+// applyContainerAlignment adjusts the start position based on
+// horizontal or vertical alignment within the container. Uses the
+// fill-pass content dimension cache to avoid redundant child-tree
+// summation.
+func applyContainerAlignment(
+	layout *Layout, hAlign HorizontalAlign, axis Axis, isRTL bool,
+	x, y, layoutW, layoutH float32,
+) (float32, float32) {
+	switch axis {
+	case axisLeftToRight:
+		var remaining float32
+		if isRTL && hAlign != HAlignRight ||
+			!isRTL && hAlign != HAlignLeft {
+			remaining = layoutW - layout.Shape.paddingWidth() -
+				contentWidth(layout)
+			if hAlign == HAlignCenter {
+				remaining /= 2
+			}
+			// Overflow leaves no space to align in: pin at the
+			// start edge, as the cross-axis helpers do.
+			remaining = f32Max(0, remaining)
+		}
+		if isRTL {
+			x -= remaining
+		} else {
+			x += remaining
+		}
+	case axisTopToBottom:
+		if layout.Shape.VAlign != VAlignTop {
+			remaining := layoutH - layout.Shape.paddingHeight() -
+				contentHeight(layout)
+			if layout.Shape.VAlign == VAlignMiddle {
+				remaining /= 2
+			}
+			y += f32Max(0, remaining)
+		}
+	}
+	return x, y
+}
+
+// childCrossAxisVAlign computes the vertical offset to center or
+// bottom-align a child within a horizontal layout (AxisLeftToRight).
+func childCrossAxisVAlign(
+	child *Layout, parent *Shape, layoutH float32,
+) (yAlign float32) {
+	remaining := layoutH - child.Shape.Height -
+		parent.paddingHeight()
+	if remaining > 0 {
+		switch parent.VAlign {
+		case VAlignTop:
+		case VAlignMiddle:
+			yAlign = remaining / 2
+		default:
+			yAlign = remaining
+		}
+	}
+	return yAlign
+}
+
+// childCrossAxisHAlign computes the horizontal offset to center or
+// right-align a child within a vertical layout (AxisTopToBottom).
+func childCrossAxisHAlign(
+	child *Layout, parent *Shape,
+	hAlign HorizontalAlign, layoutW float32,
+) (xAlign float32) {
+	remaining := layoutW - child.Shape.Width -
+		parent.paddingWidth()
+	if remaining > 0 {
+		switch hAlign {
+		case HAlignLeft:
+		case HAlignCenter:
+			xAlign = remaining / 2
+		default:
+			xAlign = remaining
+		}
+	}
+	return xAlign
+}
+
+// layoutSetShapeClips sets each shape's clip rect. Hit testing reads
+// it directly, and renderLayout derives the scissor it emits from it,
+// so the two passes agree only while this walk applies the same insets
+// the renderer does.
+func layoutSetShapeClips(layout *Layout, clip drawClip) {
+	layoutSetShapeClipsDepth(layout, clip, 0)
+}
+
+func layoutSetShapeClipsDepth(layout *Layout, clip drawClip, depth int) {
+	if overMaxDepth(depth) {
+		return
+	}
+	shapeClip := shapeBounds(layout.Shape)
+	if r, ok := rectIntersection(shapeClip, clip); ok {
+		layout.Shape.shapeClip = r
+	} else {
+		layout.Shape.shapeClip = drawClip{}
+	}
+	childClip := layout.Shape.shapeClip
+	// OverDraw children (scrollbars) sit in the padding band at the
+	// container's edge, so they keep the uninset rect. Read from the
+	// shape, not from childClip, which the inset below rebinds.
+	overClip := layout.Shape.shapeClip
+	// A clipping container scissors its children to its content box,
+	// so hit testing and a child's own clip must use the same rect the
+	// renderer emits — not the container's full bounds. Without this a
+	// clipped child (a Markdown code block) scrolled past the scroll
+	// viewport's padding edge re-derives its clip from an uninset rect
+	// and paints above the viewport.
+	if layout.Shape.Clip {
+		childClip = clipContentBox(layout.Shape)
+	}
+	// For rotated containers, children live in the internal
+	// (unrotated) coordinate space which may be larger than
+	// the display rect in the swapped dimension.
+	if turns := layout.Shape.QuarterTurns; turns == 1 || turns == 3 {
+		dw := layout.Shape.Width
+		dh := layout.Shape.Height
+		cx := layout.Shape.X + dw/2
+		cy := layout.Shape.Y + dh/2
+		rotated := drawClip{
+			X: cx - dh/2, Y: cy - dw/2,
+			Width: dh, Height: dw,
+		}
+		// The unrotated frame still sits inside every ancestor clip,
+		// and inside the content box when this container clips. Without
+		// the intersection, children scrolled out of a viewport stay
+		// hit-testable there.
+		bound := clip
+		if layout.Shape.Clip {
+			bound = childClip
+		}
+		if r, ok := rectIntersection(rotated, bound); ok {
+			childClip = r
+		} else {
+			childClip = drawClip{}
+		}
+		overClip = childClip
+	}
+	for i := range layout.Children {
+		cc := childClip
+		if layout.Children[i].Shape.OverDraw {
+			cc = overClip
+		}
+		layoutSetShapeClipsDepth(&layout.Children[i], cc, depth+1)
+	}
+}
+
+// layoutAdjustScrollOffsets ensures scroll offsets are in range.
+func layoutAdjustScrollOffsets(layout *Layout, w *Window) {
+	layoutAdjustScrollOffsetsDepth(layout, w, 0)
+}
+
+func layoutAdjustScrollOffsetsDepth(layout *Layout, w *Window, depth int) {
+	if overMaxDepth(depth) {
+		return
+	}
+	id := layout.Shape.idKey()
+	if layout.Shape.Scrollable && id != "" {
+		sx := w.scrollX()
+		sy := w.scrollY()
+		maxOffsetX := f32Min(0, layout.Shape.Width-layout.Shape.paddingWidth()-contentWidth(layout))
+		if offsetX, ok := sx.Get(id); ok {
+			sx.Set(id, f32Clamp(offsetX, maxOffsetX, 0))
+		} else {
+			sx.Set(id, f32Clamp(0, maxOffsetX, 0))
+		}
+		maxOffsetY := f32Min(0, layout.Shape.Height-layout.Shape.paddingHeight()-contentHeight(layout))
+		if offsetY, ok := sy.Get(id); ok {
+			sy.Set(id, f32Clamp(offsetY, maxOffsetY, 0))
+		} else {
+			sy.Set(id, f32Clamp(0, maxOffsetY, 0))
+		}
+	}
+	for i := range layout.Children {
+		layoutAdjustScrollOffsetsDepth(&layout.Children[i], w, depth+1)
+	}
+}

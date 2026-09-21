@@ -1,0 +1,495 @@
+package gui
+
+import (
+	"time"
+)
+
+// DatePickerWeekdays identifies days of the week (1=Monday..7=Sunday).
+type DatePickerWeekdays uint8
+
+// DatePickerWeekdays values.
+const (
+	DatePickerMonday    DatePickerWeekdays = 1
+	DatePickerTuesday   DatePickerWeekdays = 2
+	DatePickerWednesday DatePickerWeekdays = 3
+	DatePickerThursday  DatePickerWeekdays = 4
+	DatePickerFriday    DatePickerWeekdays = 5
+	DatePickerSaturday  DatePickerWeekdays = 6
+	DatePickerSunday    DatePickerWeekdays = 7
+)
+
+// DatePickerMonths identifies months (1=January..12=December).
+type DatePickerMonths uint16
+
+// DatePickerMonths values.
+const (
+	DatePickerJanuary   DatePickerMonths = 1
+	DatePickerFebruary  DatePickerMonths = 2
+	DatePickerMarch     DatePickerMonths = 3
+	DatePickerApril     DatePickerMonths = 4
+	DatePickerMay       DatePickerMonths = 5
+	DatePickerJune      DatePickerMonths = 6
+	DatePickerJuly      DatePickerMonths = 7
+	DatePickerAugust    DatePickerMonths = 8
+	DatePickerSeptember DatePickerMonths = 9
+	DatePickerOctober   DatePickerMonths = 10
+	DatePickerNovember  DatePickerMonths = 11
+	DatePickerDecember  DatePickerMonths = 12
+)
+
+// DatePickerWeekdayLen controls weekday header label length.
+type DatePickerWeekdayLen uint8
+
+// DatePickerWeekdayLen values.
+const (
+	WeekdayOneLetter   DatePickerWeekdayLen = iota // "S"
+	WeekdayThreeLetter                             // "Sun"
+	WeekdayFull                                    // "Sunday"
+)
+
+// datePickerState holds per-instance state for the date picker.
+type datePickerState struct {
+	ViewMonth           int
+	ViewYear            int
+	FocusDay            int
+	CalBodyHeight       float32
+	ShowYearMonthPicker bool
+}
+
+// DatePickerCfg configures a date picker calendar view.
+type DatePickerCfg struct {
+	// Label names this field. Empty renders exactly as before: no
+	// wrapper and no extra shape. Set, it stacks above the field in
+	// the theme's label role, and fills A11YLabel when that is unset.
+	// See gui/field_label.go for the convention and why it is one.
+	Label     string
+	TextStyle TextStyle
+	OnSelect  func([]time.Time, EventCtx)
+	ID        string `gui:"required"`
+	A11YCfg
+	Dates           []time.Time
+	AllowedWeekdays []DatePickerWeekdays
+	AllowedMonths   []DatePickerMonths
+	AllowedYears    []int
+	AllowedDates    []time.Time
+	Padding         Padding
+	SizeBorder      Opt[float32]
+	// CellSpacing gaps the day cells. Unset takes the theme default.
+	// exportaudit:keep — caller-facing config (issue #372)
+	CellSpacing Opt[float32]
+	Radius      Opt[float32]
+	// RadiusBorder rounds the calendar frame. Unset takes the theme
+	// default.
+	// exportaudit:keep — caller-facing config (issue #372)
+	RadiusBorder Opt[float32]
+	// FocusDisabled opts out of the default-on focus. Focus also
+	// requires a non-empty ID; without one the control is inert.
+	FocusDisabled bool
+	Color         Color
+	// Colors sets the per-state colors. Color above is the
+	// shorthand for Colors.Base and wins over it.
+	Colors      ColorSet
+	ColorSelect Color
+	// ColorTextOnSelect is the text color drawn over the selected
+	// day's fill. Unset takes the theme's.
+	// exportaudit:keep — caller-facing config (issue #372)
+	ColorTextOnSelect Color
+	WeekdaysLen       DatePickerWeekdayLen
+	Disabled          bool
+	Invisible         bool
+	SelectMultiple    bool
+	// HideTodayIndicator turns off the border drawn around today's cell,
+	// which is otherwise on. Named for the opt-out because the indicator is
+	// the default: a calendar that does not mark today is the rare choice
+	// (issue #504).
+	HideTodayIndicator   bool
+	MondayFirstDayOfWeek bool
+	// ShowAdjacentMonths fills the grid's leading and trailing cells with
+	// the neighboring months' days, which is otherwise off. Named for the
+	// opt-in because the plain grid is the default (issue #504).
+	ShowAdjacentMonths bool
+
+	// Sound overrides the theme's selection cue for a day cell.
+	// SoundNone (the zero value) takes Theme.Sounds.Selection, which
+	// is itself silent unless the app opted in (issue #446). The
+	// field itself stays silent: clicking it only takes focus, and a
+	// cue there would fire on every tab-through of a form
+	// (issue #467).
+	// exportaudit:keep — caller-facing config (issue #467)
+	Sound SoundCue
+
+	// SoundDisabled suppresses every day cell's sound regardless of
+	// the theme and of Sound above.
+	// exportaudit:keep — caller-facing config (issue #467)
+	SoundDisabled bool
+}
+
+type datePickerView struct {
+	cfg DatePickerCfg
+}
+
+// DatePicker creates a calendar date picker view.
+func DatePicker(cfg DatePickerCfg) View {
+	RequireID("DatePicker", cfg.ID)
+	applyDatePickerDefaults(&cfg)
+	cfg.A11YLabel = a11yLabel(cfg.A11YLabel, cfg.Label)
+	// FitFit, not a caller sizing: DatePickerCfg has no Sizing field,
+	// and the calendar grid sizes itself from its own cell metrics.
+	return labelledField(
+		cfg.Label, cfg.TextStyle, HAlignLeft, FitFit,
+		&datePickerView{cfg: cfg})
+}
+
+func (dv *datePickerView) GenerateLayout(w *Window) Layout {
+	cfg := &dv.cfg
+
+	// One resolved identity for every key below; see (*Window).EffID.
+	cfg.ID = w.EffID(cfg.ID)
+	dn := &defaultDatePickerStyle
+	cellSpacing := cfg.CellSpacing.Get(dn.cellSpacing)
+	radiusBorder := cfg.RadiusBorder.Get(dn.radiusBorder)
+
+	// Get/init state.
+	state := datePickerGetState(w, cfg)
+
+	// Build view tree: controls + body.
+	content := make([]View, 0, 2)
+	content = append(content, datePickerControls(cfg, state, w))
+	if state.ShowYearMonthPicker {
+		// Wrap roller with calendar body height to prevent height
+		// change when switching views.
+		body := datePickerYearMonthPicker(cfg, state)
+		if state.CalBodyHeight > 0 {
+			body = Column(ContainerCfg{
+				Sizing:     FillFit,
+				MinHeight:  state.CalBodyHeight,
+				HAlign:     HAlignCenter,
+				VAlign:     VAlignMiddle,
+				Padding:    NoPadding,
+				SizeBorder: NoBorder,
+				Content:    []View{body},
+			})
+		}
+		content = append(content, body)
+	} else {
+		content = append(content, datePickerCalendar(cfg, state, w))
+	}
+
+	// Stable width: 7 columns wide + gaps, plus padding and border so
+	// the min covers the full outer box. Width has to be pinned
+	// because the month/year roller is narrower than the grid.
+	//
+	// Height is deliberately NOT pinned. A cell's height comes from
+	// its measured text, which is well short of cellSize (that value
+	// is a column width), so a 6*cellSize floor left a blank band
+	// under the last week row. The grid always emits six rows, so the
+	// natural height is already stable month to month, and the roller
+	// matches it through CalBodyHeight above.
+	cellSize := datePickerCellSize(cfg)
+	pad := cfg.Padding.Or(dn.Padding)
+	sizeBorder := cfg.SizeBorder.Get(dn.SizeBorder)
+	padW := float32(pad.Left+pad.Right) + 2*sizeBorder
+	minWidth := 7*cellSize + 6*cellSpacing + padW
+
+	cfgID := cfg.ID
+	col := Column(ContainerCfg{
+		ID:        cfg.ID,
+		Focusable: !cfg.FocusDisabled,
+		A11YRole:  AccessRoleGrid,
+		A11YCfg: A11YCfg{
+			A11YLabel:       a11yLabel(cfg.A11YLabel, "Date Picker"),
+			A11YDescription: cfg.A11YDescription,
+		},
+		Color:       cfg.Colors.Base,
+		ColorBorder: cfg.Colors.Border,
+		SizeBorder:  cfg.SizeBorder,
+		Radius:      Some(radiusBorder),
+		Padding:     cfg.Padding,
+		Spacing:     Some(cellSpacing),
+		MinWidth:    minWidth,
+		Disabled:    cfg.Disabled,
+		Invisible:   cfg.Invisible,
+		Content:     content,
+		AmendLayout: focusRingAmend(Color{}, cfg.Colors.BorderFocus),
+		OnClick: func(ctx EventCtx) {
+			if !cfg.Disabled {
+				ctx.Window.SetFocus(cfg.ID)
+			}
+		},
+		OnKeyDown: func(ctx EventCtx) {
+			sm := StateMap[string, datePickerState](
+				ctx.Window, nsDatePicker, capModerate)
+			s, ok := sm.Get(cfgID)
+			if !ok {
+				return
+			}
+			if s.ShowYearMonthPicker {
+				datePickerRollerKeyDown(
+					sm, cfgID, s, ctx.Event, ctx.Window)
+			} else {
+				datePickerOnKeyDown(cfg, ctx.Event, ctx.Window)
+			}
+		},
+	})
+	return generateViewLayout(col, w)
+}
+
+// datePickerGetState retrieves or initializes per-instance state.
+func datePickerGetState(w *Window, cfg *DatePickerCfg) datePickerState {
+	sm := StateMap[string, datePickerState](w, nsDatePicker, capModerate)
+	s, ok := sm.Get(cfg.ID)
+	if !ok {
+		now := time.Now()
+		if len(cfg.Dates) > 0 {
+			now = cfg.Dates[0]
+		}
+		s = datePickerState{
+			ViewMonth: int(now.Month()),
+			ViewYear:  now.Year(),
+			FocusDay:  now.Day(),
+		}
+		sm.Set(cfg.ID, s)
+	}
+	return s
+}
+
+// DatePickerReset clears the state for a date picker instance.
+//
+// effectiveID is the widget's effective ID: a leaf under an ID-bearing
+// ancestor is addressed by its full path ("detail:nav"), not by the
+// leaf its Cfg was written with. Read it back with [Window.ResolveID].
+func (w *Window) DatePickerReset(effectiveID string) {
+	sm := StateMap[string, datePickerState](w, nsDatePicker, capModerate)
+	sm.Delete(effectiveID)
+	w.InvalidateLayout()
+}
+
+// datePickerControls builds the header row: month/year + prev/next.
+func datePickerControls(
+	cfg *DatePickerCfg, state datePickerState, _ *Window,
+) View {
+	cfgID := cfg.ID
+	monthLabel := LocaleFormatDate(
+		datePickerViewTime(state),
+		ActiveLocale.Date.MonthYear,
+	)
+
+	focusID := cfg.ID
+	onToggle := func(ctx EventCtx) {
+		sm := StateMap[string, datePickerState](ctx.Window, nsDatePicker, capModerate)
+		s, ok := sm.Get(cfgID)
+		if !ok {
+			return
+		}
+		s.ShowYearMonthPicker = !s.ShowYearMonthPicker
+		sm.Set(cfgID, s)
+		if focusID != "" {
+			ctx.Window.SetFocus(focusID)
+		}
+		ctx.Window.InvalidateLayout()
+		ctx.Consume()
+	}
+
+	onPrev := func(ctx EventCtx) {
+		if focusID != "" {
+			ctx.Window.SetFocus(focusID)
+		}
+		datePickerNavMonth(cfgID, -1, ctx.Window)
+		ctx.Consume()
+	}
+
+	onNext := func(ctx EventCtx) {
+		if focusID != "" {
+			ctx.Window.SetFocus(focusID)
+		}
+		datePickerNavMonth(cfgID, 1, ctx.Window)
+		ctx.Consume()
+	}
+
+	return Row(ContainerCfg{
+		VAlign:     VAlignMiddle,
+		Padding:    NoPadding,
+		SizeBorder: NoBorder,
+		Sizing:     FillFit,
+		Content: []View{
+			Button(ButtonCfg{
+				// Namespaced by the picker's ID so two date pickers in
+				// one window keep separate focus and state identities.
+				ID:      ScopeID(cfgID, "month"),
+				Color:   ColorTransparent,
+				Colors:  ColorSet{Border: ColorTransparent}.resolved(ColorTransparent, themeButtonSet()),
+				OnClick: onToggle,
+				Content: []View{Text(TextCfg{
+					Text: monthLabel, TextStyle: cfg.TextStyle,
+				})},
+			}),
+			Rectangle(RectangleCfg{Sizing: FillFit}),
+			Button(ButtonCfg{
+				ID:       ScopeID(cfgID, "prev"),
+				Disabled: state.ShowYearMonthPicker,
+				Color:    ColorTransparent,
+				Colors:   ColorSet{Border: ColorTransparent}.resolved(ColorTransparent, themeButtonSet()),
+				OnClick:  onPrev,
+				Content: []View{Text(TextCfg{
+					Text:      IconArrowLeft,
+					TextStyle: CurrentTheme().Icon3,
+				})},
+			}),
+			Button(ButtonCfg{
+				ID:       ScopeID(cfgID, "next"),
+				Disabled: state.ShowYearMonthPicker,
+				Color:    ColorTransparent,
+				Colors:   ColorSet{Border: ColorTransparent}.resolved(ColorTransparent, themeButtonSet()),
+				OnClick:  onNext,
+				Content: []View{Text(TextCfg{
+					Text:      IconArrowRight,
+					TextStyle: CurrentTheme().Icon3,
+				})},
+			}),
+		},
+	})
+}
+
+// datePickerOnKeyDown handles arrow key navigation.
+func datePickerOnKeyDown(cfg *DatePickerCfg, e *Event, w *Window) {
+	sm := StateMap[string, datePickerState](w, nsDatePicker, capModerate)
+	s, ok := sm.Get(cfg.ID)
+	if !ok {
+		return
+	}
+	days := datePickerDaysInMonth(s.ViewMonth, s.ViewYear)
+
+	update := func() {
+		sm.Set(cfg.ID, s)
+		w.InvalidateLayout()
+		e.IsHandled = true
+	}
+
+	switch e.KeyCode {
+	case KeyLeft:
+		s.FocusDay--
+		if s.FocusDay < 1 {
+			datePickerNavMonth(cfg.ID, -1, w)
+			s, ok = sm.Get(cfg.ID)
+			if !ok {
+				return
+			}
+			s.FocusDay = datePickerDaysInMonth(s.ViewMonth, s.ViewYear)
+		}
+		update()
+	case KeyRight:
+		s.FocusDay++
+		if s.FocusDay > days {
+			datePickerNavMonth(cfg.ID, 1, w)
+			s, ok = sm.Get(cfg.ID)
+			if !ok {
+				return
+			}
+			s.FocusDay = 1
+		}
+		update()
+	case KeyUp:
+		s.FocusDay -= 7
+		if s.FocusDay < 1 {
+			datePickerNavMonth(cfg.ID, -1, w)
+			s, ok = sm.Get(cfg.ID)
+			if !ok {
+				return
+			}
+			prevDays := datePickerDaysInMonth(s.ViewMonth, s.ViewYear)
+			s.FocusDay += prevDays
+		}
+		update()
+	case KeyDown:
+		s.FocusDay += 7
+		if s.FocusDay > days {
+			datePickerNavMonth(cfg.ID, 1, w)
+			s, ok = sm.Get(cfg.ID)
+			if !ok {
+				return
+			}
+			s.FocusDay -= days
+		}
+		update()
+	case KeyHome:
+		s.FocusDay = 1
+		update()
+	case KeyEnd:
+		s.FocusDay = days
+		update()
+	case KeyEnter, KeySpace:
+		dates := datePickerUpdateSelections(
+			s.FocusDay, s, cfg.Dates,
+			cfg.SelectMultiple)
+		if cfg.OnSelect != nil {
+			cfg.OnSelect(dates, EventCtx{nil, e, w})
+		}
+		e.IsHandled = true
+	}
+}
+
+// datePickerUpdateSelections toggles the selected day.
+func datePickerUpdateSelections(
+	day int, state datePickerState,
+	current []time.Time, multi bool,
+) []time.Time {
+	sel := time.Date(state.ViewYear, time.Month(state.ViewMonth),
+		day, 0, 0, 0, 0, time.Local) //nolint:gosmopolitan // calendar widget uses local timezone
+	if !multi {
+		return []time.Time{sel}
+	}
+	// Toggle in multi-select mode.
+	for i, d := range current {
+		if isSameDay(d, sel) {
+			result := make([]time.Time, 0, len(current)-1)
+			result = append(result, current[:i]...)
+			return append(result, current[i+1:]...)
+		}
+	}
+	return append(current, sel)
+}
+
+// datePickerDaysInMonth returns the number of days in a month.
+func datePickerDaysInMonth(month, year int) int {
+	t := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC)
+	return t.Day()
+}
+
+// datePickerCellSize returns the width/height for a single day cell.
+// V calculates dynamically via text measurement; approximate here.
+func datePickerCellSize(cfg *DatePickerCfg) float32 {
+	switch cfg.WeekdaysLen {
+	case WeekdayFull:
+		return 76
+	case WeekdayThreeLetter:
+		return 44
+	default:
+		return 36
+	}
+}
+
+func applyDatePickerDefaults(cfg *DatePickerCfg) {
+	d := &defaultDatePickerStyle
+	cfg.Colors = cfg.Colors.resolved(cfg.Color, themeColorSet(
+		d.Color, d.ColorHover, d.colorClick,
+		d.ColorFocus, d.ColorBorder, d.ColorBorderFocus,
+	))
+	if !cfg.ColorSelect.IsSet() {
+		cfg.ColorSelect = d.ColorSelect
+	}
+	if !cfg.ColorTextOnSelect.IsSet() {
+		cfg.ColorTextOnSelect = d.ColorTextOnSelect
+	}
+	if !cfg.Padding.IsSet() {
+		cfg.Padding = d.Padding
+	}
+	if cfg.TextStyle == (TextStyle{}) {
+		cfg.TextStyle = d.TextStyle
+	}
+	if !cfg.CellSpacing.IsSet() {
+		cfg.CellSpacing = Some(d.cellSpacing)
+	}
+	if !cfg.Radius.IsSet() {
+		cfg.Radius = Some(d.Radius)
+	}
+}

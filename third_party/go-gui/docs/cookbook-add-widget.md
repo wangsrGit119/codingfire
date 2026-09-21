@@ -1,0 +1,364 @@
+# Adding a new widget
+
+Step-by-step guide for adding a widget to the `gui` package. It uses `Toggle` as
+the running example. `Toggle` is a checkbox-style widget with focus, keyboard
+handling, accessibility, and theme defaults.
+
+## 1. Create the Cfg struct
+
+Every widget has a `*Cfg` struct. Conventions:
+
+- **Zero-initializable** — all fields have usable zero values. Users omit what
+  they do not need: `ToggleCfg{Label: "Accept"}`
+- **Opt[T] for optional overrides** — `Opt[float32]` distinguishes "not set"
+  from an explicit zero for primitives. Owned structs self-flag instead.
+  `Padding` and `Color` carry a `set` field, so they are plain fields.
+  `Padding{}` is unset (theme default applies). Build values with
+  `NewPadding`/`PadAll`/`PaddingNone`. Read them with `cfg.Radius.Get(default)`
+  / `cfg.Padding.Or(default)` in the factory.
+- **Common fields** — every interactive widget includes `ID string`,
+  `Disabled bool`, `Invisible bool`, and a focus field. The focus field is
+  either `Focusable bool` (opt-in, for example Table) or `FocusDisabled bool`
+  (opt-out, for controls focusable by default, for example Input, Toggle,
+  Slider, Select). Focus always requires a non-empty `ID`. Without one, the
+  control never joins the tab order. Container-like widgets add `Sizing Sizing`,
+  `Float bool`, `FloatAnchor FloatAttach`, `FloatTieOff FloatAttach`,
+  `Padding Padding`, `Radius Opt[float32]`, `SizeBorder Opt[float32]` (`Table`
+  is the exception: its `SizeBorder` is a plain `float32` applied as-is).
+- **Callbacks** — one func field per event. Sig: `func(EventCtx)`. One rule for
+  all of them: call `ctx.Consume()` on any path that acts on the event. On any
+  path that means "not mine", call nothing. Nothing is marked handled for you. A
+  widget that means to absorb a click must say so.
+- **`gui:"required"` tag** — fields that must be non-empty get the tag. The
+  `requiredid` vet analyzer enforces this at `go vet` time. Use the tag only
+  when the widget cannot function without the value (for example `FormCfg.ID`).
+
+Minimal example:
+
+```go
+// file: gui/view_toggle.go
+
+// ToggleCfg configures a toggle/checkbox button.
+type ToggleCfg struct {
+    TextStyle      TextStyle
+    TextStyleLabel TextStyle
+    OnClick        func(EventCtx)
+    ID             string `gui:"required,focus"`
+    Label          string
+    TextSelect     string
+    TextUnselect   string
+
+    // A11YCfg embeds A11YLabel + A11YDescription. Every Cfg whose
+    // widget reaches the a11y tree carries it; never redeclare the
+    // two fields.
+    A11YCfg
+    Padding Padding
+    // Size overrides the square edge length of the check box.
+    Size       Opt[float32]
+    SizeBorder Opt[float32]
+    Radius     Opt[float32]
+    MinWidth   float32
+    // FocusDisabled opts out of the default-on focus. Focus also
+    // requires a non-empty ID; without one the control is inert.
+    FocusDisabled bool
+    Color         Color
+    // Colors sets the per-state colors. Color above is the
+    // shorthand for Colors.Base and wins over it.
+    Colors      ColorSet
+    ColorSelect Color
+    Disabled    bool
+    Invisible   bool
+    Selected    bool
+}
+```
+
+## 2. Write the factory function
+
+Sig: `func WidgetName(cfg WidgetCfg) View`. The function:
+
+1. **Calls applyDefaults** — provides theme colors, sizes, and text styles for
+   any field the user did not set
+2. **Reads Opt[T] values** via `.Get(fallback)` to resolve "not set"
+3. **Builds a Layout tree** — returns a `ContainerCfg`-based layout (usually
+   `Row`, `Column`, or `Canvas`)
+4. **Sets a11y** — role, state, label on the root shape
+5. **Wires events** — OnClick, OnHover, OnChar, AmendLayout
+
+```go
+func Toggle(cfg ToggleCfg) View {
+    applyToggleDefaults(&cfg)
+    requireFocusID("Toggle", cfg.FocusDisabled, cfg.ID)
+
+    d := &DefaultToggleStyle
+    sizeBorder := cfg.SizeBorder.Get(d.SizeBorder)
+    radius := cfg.Radius.Get(d.Radius)
+
+    boxColor := cfg.Colors.Base
+    if cfg.Selected {
+        boxColor = cfg.ColorSelect
+    }
+
+    txt := cfg.TextSelect
+    txtStyle := cfg.TextStyle
+    if !cfg.Selected {
+        if cfg.TextUnselect == " " {
+            txtStyle.Color = ColorTransparent
+        } else {
+            txt = cfg.TextUnselect
+        }
+    }
+
+    content := make([]View, 0, 2)
+    content = append(content, Row(ContainerCfg{
+        Color:       boxColor,
+        ColorBorder: cfg.Colors.Border,
+        SizeBorder:  Some(sizeBorder),
+        Padding:     cfg.Padding,
+        Radius:      Some(radius),
+        Disabled:    cfg.Disabled,
+        Invisible:   cfg.Invisible,
+        HAlign:      HAlignCenter,
+        VAlign:      VAlignMiddle,
+        Content: []View{
+            Text(TextCfg{Text: txt, TextStyle: txtStyle}),
+        },
+    }))
+
+    if len(cfg.Label) > 0 {
+        content = append(content,
+            Text(TextCfg{Text: cfg.Label, TextStyle: cfg.TextStyleLabel}))
+    }
+
+    a11yState := AccessStateNone
+    if cfg.Selected {
+        a11yState = AccessStateChecked
+    }
+
+    colorFocus := cfg.Colors.Focus
+    colorBorderFocus := cfg.Colors.BorderFocus
+    colorHover := cfg.Colors.Hover
+    colorClick := cfg.Colors.Click
+
+    return Row(ContainerCfg{
+        ID:         cfg.ID,
+        Focusable:  !cfg.FocusDisabled,
+        Disabled:   cfg.Disabled,
+        Invisible:  cfg.Invisible,
+        SizeBorder: NoBorder,
+        Padding:    NoPadding,
+        VAlign:     VAlignMiddle,
+        A11YRole:   AccessRoleCheckbox,
+        A11YState:  a11yState,
+        A11YCfg: A11YCfg{
+            A11YLabel:       a11yLabel(cfg.A11YLabel, cfg.Label),
+            A11YDescription: cfg.A11YDescription,
+        },
+        ClickOnSpace: true,
+        OnClick:      cfg.OnClick,
+        ClickButton:  MouseLeft,
+        MinWidth:     cfg.MinWidth,
+        OnHover:      /* hover highlight */,
+        AmendLayout:  /* focus highlight */,
+        Content:      content,
+    })
+}
+```
+
+### Key patterns
+
+**OnClick + keyboard activation** — use `ContainerCfg` fields to wire standard
+click semantics without per-frame closures:
+
+```go
+// Left-click only (not right/middle).
+OnClick:     cfg.OnClick,
+ClickButton: MouseLeft,
+
+// Space/Enter keyboard activation (Focusable + non-empty ID required).
+ClickOnSpace: true,
+```
+
+**Hover/focus feedback** — use `OnHover` for mouse hover, `AmendLayout` for
+keyboard focus. `AmendLayout` runs every frame after sizing. Use it to update
+child colors based on `w.IsFocus(layout.Shape.idKey())` — never the bare
+`Shape.ID`, which is the leaf, not the identity.
+
+**Inner IDs** — a composite widget's inner shapes need their own IDs. Compose
+them with `gui.ScopeID(cfg.ID, "part")`, or `gui.ScopeIDN(cfg.ID, "row", i)`
+when a loop index is what distinguishes siblings. Never concatenate by hand:
+`make ergonomics-audit` fails on it, and the separator zoo it replaced is
+documented in `docs/specs/widget-id-scoping.md`. If an inner shape only needs
+the owner's focus state, set `Shape.focusOwner` instead of giving it an ID.
+
+**a11yLabel helper** — `a11yLabel(userLabel, fallback)` returns the
+user-supplied label if non-empty, otherwise the fallback. Set it on every
+interactive widget. When the widget builds a `Shape` directly rather than
+delegating to a `ContainerCfg`, use `cfg.a11yInfo(fallback)` instead. It is the
+same pairing, promoted from the embedded `A11YCfg`. It returns the `*accessInfo`
+the shape's `a11Y` field wants.
+
+## 3. Theme defaults
+
+Most widgets have a default style struct in `styles_widget.go`:
+
+```go
+// In styles_widget.go
+
+type ToggleStyle struct {
+    Color            Color
+    ColorFocus       Color
+    ColorHover       Color
+    ColorClick       Color
+    ColorBorder      Color
+    ColorBorderFocus Color
+    ColorSelect      Color
+    Padding          Padding
+    Size             float32
+    SizeBorder       float32
+    Radius           float32
+    TextStyleNormal  TextStyle
+    TextStyleLabel   TextStyle
+}
+
+var DefaultToggleStyle = ToggleStyle{...}
+```
+
+And in the theme's `init()` or `buildTheme()` function, populate the light/dark
+variants. The factory's `applyDefaults` function provides any field the user did
+not set. The per-state colors resolve through `ColorSet`, with the flat `Color`
+field as the `Base` shorthand:
+
+```go
+func applyToggleDefaults(cfg *ToggleCfg) {
+    d := &DefaultToggleStyle
+    cfg.Colors = cfg.Colors.resolved(cfg.Color, themeColorSet(
+        d.Color, d.ColorHover, d.ColorClick,
+        d.ColorFocus, d.ColorBorder, d.ColorBorderFocus,
+    ))
+    if cfg.TextSelect == "" {
+        cfg.TextSelect = "✓"
+    }
+    if !cfg.Padding.IsSet() {
+        cfg.Padding = d.Padding
+    }
+    if cfg.TextStyle == (TextStyle{}) {
+        cfg.TextStyle = d.TextStyleNormal
+    } else {
+        cfg.TextStyle = mergeTextStyle(cfg.TextStyle, d.TextStyleNormal)
+    }
+    // ... repeat for each style field
+}
+```
+
+If your widget does not need custom theme entries, skip this step. Simple
+widgets can use `guiTheme` colors directly.
+
+## 4. Write tests
+
+Test file: `gui/view_toggle_test.go`. Test at minimum:
+
+1. **Layout structure** — assert the generated Layout has the expected shape,
+   axis, and children
+2. **Config passthrough** — ID, Disabled, Selected flags propagate to the
+   correct Shape
+3. **Property rendering** — text content, colors, sizing reflect the config
+4. **Accessibility** — role, state, label are set correctly on the root Shape
+
+Use `generateViewLayout(view, &Window{})` to build a Layout tree headlessly (no
+backend needed):
+
+```go
+func TestToggleIDPassthrough(t *testing.T) {
+    w := &Window{}
+    layout := generateViewLayout(
+        Toggle(ToggleCfg{ID: "tg1", OnClick: noop}), w)
+    if layout.Shape.ID != "tg1" {
+        t.Errorf("ID: got %s", layout.Shape.ID)
+    }
+}
+
+func TestToggleSelectedTextContent(t *testing.T) {
+    w := &Window{}
+    layout := generateViewLayout(Toggle(ToggleCfg{
+        OnClick:      noop,
+        Selected:     true,
+        TextSelect:   "YES",
+        TextUnselect: "NO",
+    }), w)
+    box := layout.Children[0]
+    tc := box.Children[0].Shape.TC
+    if tc == nil || tc.Text != "YES" {
+        t.Errorf("text: got %v, want YES", tc)
+    }
+}
+```
+
+For interactive widgets, also test event handling with `NewTestWindow` and the
+`Test*` methods — `TestRender`, `TestClick`, `TestKey`. They push real events
+through the same dispatch the backend uses, with no run loop.
+
+## 5. Add to showcase
+
+In `examples/showcase/`, create a demo function and register it:
+
+```go
+// examples/showcase/demo_toggle.go
+func demoToggle(_ *gui.Window) gui.View {
+    return gui.Column(gui.ContainerCfg{
+        Padding: gui.PadAll(8),
+        Spacing: gui.SomeF(8),
+        Content: []gui.View{
+            gui.Toggle(gui.ToggleCfg{
+                Label:    "Basic toggle",
+                OnClick:  func(ctx gui.EventCtx) {},
+            }),
+            gui.Toggle(gui.ToggleCfg{
+                Label:    "Pre-selected",
+                Selected: true,
+                OnClick:  func(ctx gui.EventCtx) {},
+            }),
+            gui.Toggle(gui.ToggleCfg{
+                Label:    "Disabled",
+                Disabled: true,
+                OnClick:  func(ctx gui.EventCtx) {},
+            }),
+        },
+    })
+}
+```
+
+Register in `examples/showcase/detail.go`:
+
+```go
+var componentDemos = map[string]func(*gui.Window) gui.View{
+    // ...
+    "toggle": demoToggle,
+    // ...
+}
+```
+
+## 6. Verify
+
+```bash
+go test ./gui/...          # all tests (including your new ones)
+go vet ./gui/...           # static analysis (requiredid tag checks)
+golangci-lint run ./gui/... # full lint
+go run ./examples/showcase/ # visual check
+```
+
+## Checklist
+
+- [ ] `gui/view_<name>.go` — Cfg struct + factory function
+- [ ] Cfg zero-initializable, Opt[T] for optional fields
+- [ ] `gui:"required"` tag on mandatory fields (if any)
+- [ ] a11y role, state, label set on the root shape
+- [ ] Keyboard/click semantics via `ClickOnSpace` / `ClickButton` /
+      `ClickOnEnter` where appropriate
+- [ ] Theme defaults in `styles_widget.go` (or skip if not needed)
+- [ ] `apply<Name>Defaults` function for theme fallback
+- [ ] `gui/view_<name>_test.go` — layout structure, config passthrough, a11y,
+      property rendering tests
+- [ ] `examples/showcase/demo_<name>.go` — demo function
+- [ ] `examples/showcase/detail.go` — registered in `componentDemos`
+- [ ] `go test ./gui/...` passes
+- [ ] `golangci-lint run ./gui/...` passes

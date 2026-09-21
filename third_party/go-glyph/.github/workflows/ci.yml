@@ -1,0 +1,382 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Read-only. Nothing here publishes, comments or tags, so the job token
+# needs no more than the checkout.
+permissions:
+  contents: read
+
+# Unlike the sibling repos, go-glyph's native dependencies are real and
+# must stay. backend/gpu/gl_linux.go declares `#cgo pkg-config: gl x11`,
+# gl_windows.go links -lopengl32 -lgdi32, and examples/demo_gpu and
+# examples/showcase_gpu are separate modules that bind SDL2 directly. So
+# libgl1-mesa-dev, libx11-dev, libsdl2-dev, pkg-config, the MSYS2
+# toolchain and `brew install sdl2` all have callers. The Noto font
+# packages back the fallback and emoji tests.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            examples/demo/go.sum
+            examples/demo_gpu/go.sum
+
+            examples/showcase_gpu/go.sum
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libsdl2-dev \
+            fonts-noto-cjk \
+            fonts-noto-color-emoji \
+            pkg-config
+
+      - name: Test root module
+        env:
+          CGO_ENABLED: "1"
+        run: go test -coverprofile=coverage.out ./...
+
+      - name: Build ebitengine backend module (tests need a display)
+        env:
+          CGO_ENABLED: "1"
+        run: ( cd backend/ebitengine && go build ./... )
+
+      - name: Vet root module
+        env:
+          CGO_ENABLED: "1"
+        run: go vet ./...
+
+      - name: Assert Linux library builds and tests without cgo
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build .
+          go vet .
+          go test .
+
+      - name: Build examples
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -euo pipefail
+
+          modules=(
+            "examples/demo"
+            "examples/demo_gpu"
+            "examples/showcase_gpu"
+          )
+
+          for module in "${modules[@]}"; do
+            echo "==> go build ./... ($module)"
+            ( cd "$module" && go build ./... )
+          done
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libx11-dev \
+            fonts-noto-cjk \
+            fonts-noto-color-emoji \
+            pkg-config
+
+      - name: Run golangci-lint
+        env:
+          GOLANGCI_LINT_VERSION: v2.12.2
+        run: |
+          curl -sSfL https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION#v}-linux-amd64.tar.gz | \
+            tar xz -C /tmp
+          /tmp/golangci-lint-${GOLANGCI_LINT_VERSION#v}-linux-amd64/golangci-lint run \
+            . ./accessibility ./backend/gpu ./ime
+
+  test-wasm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build root package for WASM
+        env:
+          GOOS: js
+          GOARCH: wasm
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: Build WASM example
+        env:
+          GOOS: js
+          GOARCH: wasm
+          CGO_ENABLED: "0"
+        run: ( cd examples/showcase_web && go build ./... )
+
+      - name: Vet WASM packages
+        env:
+          GOOS: js
+          GOARCH: wasm
+          CGO_ENABLED: "0"
+        run: go vet ./...
+
+  test-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Resolve iOS simulator SDK paths
+        id: sdk
+        run: |
+          echo "sdk_path=$(xcrun --sdk iphonesimulator --show-sdk-path)" >> "$GITHUB_OUTPUT"
+          echo "cc_path=$(xcrun --sdk iphonesimulator --find clang)" >> "$GITHUB_OUTPUT"
+
+      - name: Build root package for iOS
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ios
+          GOARCH: arm64
+          CC: ${{ steps.sdk.outputs.cc_path }}
+          CGO_CFLAGS: "-isysroot ${{ steps.sdk.outputs.sdk_path }} -mios-simulator-version-min=17.0"
+          CGO_LDFLAGS: "-isysroot ${{ steps.sdk.outputs.sdk_path }} -mios-simulator-version-min=17.0"
+        run: go build -tags ios ./...
+
+      - name: Build iOS example
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ios
+          GOARCH: arm64
+          CC: ${{ steps.sdk.outputs.cc_path }}
+          CGO_CFLAGS: "-isysroot ${{ steps.sdk.outputs.sdk_path }} -mios-simulator-version-min=17.0"
+          CGO_LDFLAGS: "-isysroot ${{ steps.sdk.outputs.sdk_path }} -mios-simulator-version-min=17.0"
+        run: ( cd examples/showcase_ios && go build ./... )
+
+      - name: Vet iOS packages
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ios
+          GOARCH: arm64
+          CC: ${{ steps.sdk.outputs.cc_path }}
+          CGO_CFLAGS: "-isysroot ${{ steps.sdk.outputs.sdk_path }} -mios-simulator-version-min=17.0"
+          CGO_LDFLAGS: "-isysroot ${{ steps.sdk.outputs.sdk_path }} -mios-simulator-version-min=17.0"
+        run: go vet -tags ios ./...
+
+  test-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            examples/showcase_android/go.sum
+
+      - name: Assert Android library builds and tests without cgo
+        env:
+          CGO_ENABLED: "0"
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+          go build .
+          go vet .
+          go test -c -o /dev/null .
+
+      - name: Resolve Android NDK toolchain
+        id: ndk
+        run: |
+          TC="${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "cc=${TC}/aarch64-linux-android21-clang" >> "$GITHUB_OUTPUT"
+
+      - name: Build root package for Android (incl. cgo GLES backend)
+        env:
+          CGO_ENABLED: "1"
+          GOOS: android
+          GOARCH: arm64
+          CC: ${{ steps.ndk.outputs.cc }}
+        run: go build ./...
+
+      - name: Build Android example (JNI shell needs cgo)
+        env:
+          CGO_ENABLED: "1"
+          GOOS: android
+          GOARCH: arm64
+          CC: ${{ steps.ndk.outputs.cc }}
+        run: ( cd examples/showcase_android && go build ./... )
+
+      - name: Compile example tests
+        env:
+          CGO_ENABLED: "1"
+          GOOS: android
+          GOARCH: arm64
+          CC: ${{ steps.ndk.outputs.cc }}
+        run: ( cd examples/showcase_android && go test -c -o /dev/null . )
+
+      - name: Vet Android packages
+        env:
+          CGO_ENABLED: "1"
+          GOOS: android
+          GOARCH: arm64
+          CC: ${{ steps.ndk.outputs.cc }}
+        run: go vet ./...
+
+  test-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install MSYS2 and dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkg-config
+
+      - name: Set CGo environment
+        shell: msys2 {0}
+        run: |
+          echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
+          echo "CC=$(cygpath -w "$(which gcc)")" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(cygpath -w "$MSYSTEM_PREFIX/lib/pkgconfig")" >> "$GITHUB_ENV"
+          cygpath -w "$MSYSTEM_PREFIX/bin" >> "$GITHUB_PATH"
+
+      - name: Test root module
+        run: go test ./...
+
+      - name: Test ebitengine backend module
+        run: ( cd backend/ebitengine && go test ./... )
+
+      - name: Build root package
+        run: go build ./...
+
+      - name: Vet Windows packages
+        run: go vet ./...
+
+  test-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            backend/ebitengine/go.sum
+            examples/demo/go.sum
+            examples/demo_gpu/go.sum
+
+            examples/showcase_gpu/go.sum
+
+      - name: Install native dependencies
+        run: brew install sdl2 pkg-config
+
+      - name: Clear Go build cache
+        run: go clean -cache
+
+      - name: Test root module
+        env:
+          CGO_ENABLED: "1"
+          # Safety net: the root test's peak heap is ~1 GB after the
+          # fallback-coverage tests were switched to the cheap cmap cache
+          # (see context_puregoft_test.go / layout_equiv_ft_test.go). Before
+          # that, those tests full-parsed every system fallback font, spiking
+          # peak RSS to ~3.5 GB and OOM-killing the macos-26 runner
+          # ("signal: killed"). GOMEMLIMIT caps regrowth if the runner's font
+          # set expands again; -p 1 keeps concurrent package binaries bounded.
+          GOMEMLIMIT: "2GiB"
+        run: go test -p 1 ./...
+
+      - name: Test ebitengine backend module
+        env:
+          CGO_ENABLED: "1"
+          GOMEMLIMIT: "2GiB"
+        run: ( cd backend/ebitengine && go test ./... )
+
+      - name: Vet root module
+        env:
+          CGO_ENABLED: "1"
+        run: go vet ./...
+
+      - name: Build examples
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -euo pipefail
+
+          modules=(
+            "examples/demo"
+            "examples/demo_gpu"
+            "examples/showcase_gpu"
+          )
+
+          for module in "${modules[@]}"; do
+            echo "==> go build ./... ($module)"
+            ( cd "$module" && go build ./... )
+          done

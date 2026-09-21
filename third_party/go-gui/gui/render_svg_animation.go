@@ -1,0 +1,454 @@
+package gui
+
+import (
+	"cmp"
+	"math"
+	"slices"
+)
+
+// svgAnimState holds computed per-group animation state.
+type svgAnimState struct {
+	AttrOverride SvgAnimAttrOverride // attribute overrides for re-tessellation
+	RotAngle     float32             // rotation degrees
+	RotCX        float32             // rotation center X (SVG space)
+	RotCY        float32             // rotation center Y (SVG space)
+	Opacity      float32             // 0..1; <animate attributeName="opacity">
+	// FillOpacity / StrokeOpacity track the per-paint opacity
+	// animations. They scale only the matching path role at render
+	// time so a fill-opacity animation does not dim the stroke.
+	FillOpacity   float32
+	StrokeOpacity float32
+	// TransX/TransY is the animated translate; ScaleX/ScaleY the
+	// animated scale. Identity when HasXform is false.
+	TransX, TransY float32
+	ScaleX, ScaleY float32
+	// FillColor / StrokeColor carry CSS color-tween results
+	// (SvgAnimColor). Has*Color flags whether the channel is set;
+	// emitSvgPathRenderer overrides the path color when the
+	// matching path role is set.
+	FillColor      SvgColor
+	StrokeColor    SvgColor
+	HasXform       bool
+	Inited         bool
+	HasFillColor   bool
+	HasStrokeColor bool
+}
+
+// computeSvgAnimations builds a map of per-group animation state
+// from parsed SMIL animations and elapsed time. Implements SMIL
+// "sandwich" semantics: each animation's last activation time is
+// computed (BeginSec + n*Cycle for the largest n with that <=
+// elapsed); contributions are sorted by activation ascending and
+// applied last-write-wins per attribute. fill="freeze" lets a past
+// animation continue to contribute its last keyframe value until
+// its cycle restarts or a later-activated animation overrides.
+func computeSvgAnimations(
+	anims []SvgAnimation, elapsedSec float32,
+	states map[uint32]svgAnimState,
+) map[uint32]svgAnimState {
+	return computeSvgAnimationsReuse(anims, elapsedSec, states, nil, nil)
+}
+
+// computeSvgAnimationsReuse is the render-path variant that
+// accepts a scratch []animContrib to avoid per-frame allocation.
+// baseByPath seeds per-PathID state with the author's decomposed
+// base transform so additive/replace animations compose over it.
+// Pass nil when no base seeding is needed (tests, no-base assets).
+func computeSvgAnimationsReuse(
+	anims []SvgAnimation, elapsedSec float32,
+	states map[uint32]svgAnimState,
+	contribScratch []animContrib,
+	baseByPath map[uint32]svgBaseXform,
+) map[uint32]svgAnimState {
+	if states == nil {
+		states = make(map[uint32]svgAnimState, len(anims))
+	} else {
+		clear(states)
+	}
+	contribs := collectAnimContribs(anims, elapsedSec, contribScratch)
+	if len(contribs) == 0 {
+		return states
+	}
+	slices.SortStableFunc(contribs, cmpAnimContrib)
+	for i := range contribs {
+		applyAnimContrib(&contribs[i], states, baseByPath)
+	}
+	return states
+}
+
+// cmpAnimContrib orders contributions by ascending activation
+// time so sandwich priority applies last-write-wins.
+func cmpAnimContrib(a, b animContrib) int {
+	return cmp.Compare(a.activation, b.activation)
+}
+
+// animContrib is one animation's evaluated contribution at the
+// current frame: the resolved value(s), the last activation time
+// used for sandwich-priority ordering, and a back-pointer to the
+// animation for kind/group dispatch. frac carries the raw [0,1]
+// phase for kinds (SvgAnimDashArray) whose apply step needs the
+// un-lerped fraction to do its own per-slot interpolation.
+type animContrib struct {
+	anim       *SvgAnimation
+	value      float32
+	valueX     float32
+	valueY     float32
+	frac       float32
+	activation float32
+	// colorVal carries the lerped RGBA result for SvgAnimColor;
+	// other kinds leave it zero.
+	colorVal SvgColor
+}
+
+// collectAnimContribs evaluates every animation's phase against
+// elapsed and returns the subset that contributes this frame
+// (active or frozen). Skipped animations: no target paths, missing
+// dur, not-yet-activated (elapsed < BeginSec), past dur with !Freeze.
+// reuse may be a scratch slice whose backing array will be
+// reused in place; pass nil to allocate a fresh slice.
+func collectAnimContribs(
+	anims []SvgAnimation, elapsedSec float32,
+	reuse []animContrib,
+) []animContrib {
+	out := reuse[:0]
+	if cap(out) < len(anims) {
+		out = make([]animContrib, 0, len(anims))
+	}
+	for i := range anims {
+		a := &anims[i]
+		// Reject non-finite timing fields so downstream Lerp / floor
+		// math cannot produce NaN values that would propagate into
+		// render state. DurSec must be strictly positive for normal
+		// animations; <set> is zero-duration and bypasses this check.
+		if len(a.TargetPathIDs) == 0 ||
+			!f32IsFinite(a.DurSec) ||
+			(!a.IsSet && a.DurSec <= 0) ||
+			!f32IsFinite(a.BeginSec) ||
+			!f32IsFinite(a.Cycle) ||
+			!f32IsFinite(elapsedSec) {
+			continue
+		}
+		if elapsedSec < a.BeginSec && !a.FillBackwards {
+			continue
+		}
+		var (
+			activation = a.BeginSec
+			frac       float32
+		)
+		switch {
+		case a.IsSet:
+			if elapsedSec < a.BeginSec {
+				continue
+			}
+			frac = 1
+		case a.Iterations > 0:
+			ok, f, act := cssIterPhase(a, elapsedSec)
+			if !ok {
+				continue
+			}
+			frac, activation = f, act
+		default:
+			ok, f, act := smilPhase(a, elapsedSec)
+			if !ok {
+				continue
+			}
+			frac, activation = f, act
+		}
+		c := animContrib{anim: a, activation: activation, frac: frac}
+		if !evalAnimContrib(&c, a, frac, activation) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// smilPhase computes SMIL-style phase: cycle-based re-fire,
+// freeze on overrun, single play when Cycle==0.
+func smilPhase(a *SvgAnimation, elapsedSec float32) (bool, float32, float32) {
+	activation := a.BeginSec
+	if a.Cycle > 0 && a.Restart != SvgAnimRestartNever {
+		n := math.Floor(float64(elapsedSec-a.BeginSec) / float64(a.Cycle))
+		if a.Restart == SvgAnimRestartWhenNotActive && n > 0 {
+			prev := a.BeginSec + float32(n-1)*a.Cycle
+			if elapsedSec-prev < a.DurSec {
+				n--
+			}
+		}
+		activation = a.BeginSec + float32(n)*a.Cycle
+	}
+	phase := elapsedSec - activation
+	switch {
+	case phase < a.DurSec:
+		return true, phase / a.DurSec, activation
+	case a.Freeze:
+		return true, 1, activation
+	}
+	return false, 0, activation
+}
+
+// cssIterPhase computes CSS-style phase: a fixed iteration count,
+// each iteration of length DurSec. Alternate flips the phase on
+// odd iterations. FillBackwards contributes frac=0 before BeginSec.
+func cssIterPhase(a *SvgAnimation, elapsedSec float32) (bool, float32, float32) {
+	if elapsedSec < a.BeginSec {
+		// FillBackwards already gated upstream.
+		frac := float32(0)
+		if a.Alternate && a.Iterations != SvgAnimIterInfinite &&
+			(int(a.Iterations)-1)%2 == 1 {
+			frac = 1
+		}
+		return true, frac, a.BeginSec
+	}
+	phase := elapsedSec - a.BeginSec
+	iter := int(math.Floor(float64(phase) / float64(a.DurSec)))
+	iterPhase := phase - float32(iter)*a.DurSec
+	if a.Iterations != SvgAnimIterInfinite && iter >= int(a.Iterations) {
+		if !a.Freeze {
+			return false, 0, a.BeginSec
+		}
+		iter = int(a.Iterations) - 1
+		iterPhase = a.DurSec
+	}
+	frac := iterPhase / a.DurSec
+	if frac > 1 {
+		frac = 1
+	}
+	if a.Alternate && iter%2 == 1 {
+		frac = 1 - frac
+	}
+	return true, frac, a.BeginSec
+}
+
+// evalAnimContrib fills c with the kind-specific lerped values for
+// this frame. Returns false when the animation lacks enough data to
+// contribute (too few values, stride mismatch, etc.).
+func evalAnimContrib(c *animContrib, a *SvgAnimation,
+	frac, activation float32) bool {
+	switch a.Kind {
+	case SvgAnimRotate, SvgAnimOpacity, SvgAnimAttr, SvgAnimDashOffset:
+		if len(a.Values) < 2 {
+			return false
+		}
+		c.value = lerpKeyframes(
+			a.Values, a.KeySplines, a.KeyTimes, a.CalcMode, frac)
+		if a.Accumulate {
+			c.value += accumOffset(a, activation) *
+				(a.Values[len(a.Values)-1] - a.Values[0])
+		}
+	case SvgAnimDashArray:
+		k := int(a.DashKeyframeLen)
+		if k <= 0 || k > SvgAnimDashArrayCap || len(a.Values) < 2*k {
+			return false
+		}
+	case SvgAnimTranslate, SvgAnimScale:
+		if len(a.Values) < 4 {
+			return false
+		}
+		c.valueX, c.valueY = lerpKeyframes2D(
+			a.Values, a.KeySplines, a.KeyTimes, a.CalcMode, frac)
+		if a.Accumulate {
+			n := accumOffset(a, activation)
+			last := len(a.Values) - 2
+			c.valueX += n * (a.Values[last] - a.Values[0])
+			c.valueY += n * (a.Values[last+1] - a.Values[1])
+		}
+	case SvgAnimMotion:
+		if len(a.MotionPath) < 4 || len(a.MotionLengths) < 2 {
+			return false
+		}
+		c.valueX, c.valueY, c.value = motionSample(a, frac)
+	case SvgAnimColor:
+		if len(a.ColorValues) < 2 {
+			return false
+		}
+		c.colorVal = lerpColorKeyframes(
+			a.ColorValues, a.KeySplines, a.KeyTimes, a.CalcMode, frac)
+	}
+	return true
+}
+
+// motionSample interpolates along an animateMotion's flattened path
+// by arc length. frac ∈ [0,1] scales to [0, totalLen]; returns the
+// (x,y) point and — when MotionRotate==auto — the tangent angle in
+// degrees. Returns zeros when lens/poly are inconsistent or the
+// total length is non-finite — the caller treats that as the
+// identity contribution.
+func motionSample(a *SvgAnimation, frac float32) (float32, float32, float32) {
+	lens := a.MotionLengths
+	poly := a.MotionPath
+	n := len(lens)
+	if n < 2 || len(poly) < 2*n {
+		return 0, 0, 0
+	}
+	total := lens[n-1]
+	if !f32IsFinite(total) || total < 0 {
+		return 0, 0, 0
+	}
+	target := clampUnit(frac) * total
+	idx := 0
+	for i := 1; i < n; i++ {
+		if lens[i] >= target {
+			idx = i - 1
+			break
+		}
+		idx = i
+	}
+	if idx >= n-1 {
+		idx = n - 2
+	}
+	span := lens[idx+1] - lens[idx]
+	var t float32
+	if span > 0 {
+		t = (target - lens[idx]) / span
+	}
+	x0, y0 := poly[idx*2], poly[idx*2+1]
+	x1, y1 := poly[(idx+1)*2], poly[(idx+1)*2+1]
+	x := x0 + (x1-x0)*t
+	y := y0 + (y1-y0)*t
+	var angle float32
+	if a.MotionRotate != SvgAnimMotionRotateNone {
+		dx := x1 - x0
+		dy := y1 - y0
+		angle = float32(math.Atan2(float64(dy), float64(dx))) *
+			(180 / math.Pi)
+		if a.MotionRotate == SvgAnimMotionRotateAutoReverse {
+			angle += 180
+		}
+	}
+	return x, y, angle
+}
+
+// accumOffset returns the repeat-count offset for accumulate=sum.
+// The count is floor((activation - BeginSec) / Cycle) — the number
+// of completed prior cycles. Cycle must be >0.
+func accumOffset(a *SvgAnimation, activation float32) float32 {
+	if a.Cycle <= 0 {
+		return 0
+	}
+	return float32(math.Floor(
+		float64(activation-a.BeginSec) / float64(a.Cycle)))
+}
+
+// extractAttrOverrides pulls the AttrOverride from each svgAnimState
+// with a non-zero mask into a scratch-backed map keyed by PathID.
+// Returns an empty map when no overrides are live.
+func extractAttrOverrides(w *Window,
+	states map[uint32]svgAnimState,
+) map[uint32]SvgAnimAttrOverride {
+	overrides := w.scratch.svgAnimOverrides.take(len(states))
+	for pid, st := range states {
+		if st.AttrOverride.Mask != 0 {
+			overrides[pid] = st.AttrOverride
+		}
+	}
+	return overrides
+}
+
+// locateSeg returns the keyframe segment containing frac: the
+// lower index, the intra-segment fraction t (bent by splines when
+// mode==Spline), and atEnd when frac lands on or past the last
+// keyframe. Segment boundaries come from keyTimes when supplied,
+// else uniform i/(n-1) for linear/spline and i/n for discrete.
+// frac is clamped; NaN / negative → idx=0, t=0.
+func locateSeg(
+	n int, frac float32, splines, keyTimes []float32,
+	mode SvgAnimCalcMode,
+) (int, float32, bool) {
+	frac = clampUnit(frac)
+	if n <= 0 {
+		return 0, 0, true
+	}
+	if len(keyTimes) == n {
+		return locateSegKeyTimes(n, frac, splines, keyTimes, mode)
+	}
+	if mode == SvgAnimCalcDiscrete {
+		if frac >= 1 {
+			return n - 1, 0, true
+		}
+		idx := int(frac * float32(n))
+		if idx >= n {
+			idx = n - 1
+		}
+		return idx, 0, false
+	}
+	seg := frac * float32(n-1)
+	idx := max(int(seg), 0)
+	if idx >= n-1 {
+		return n - 1, 0, true
+	}
+	t := seg - float32(idx)
+	if mode == SvgAnimCalcSpline && len(splines) == 4*(n-1) {
+		off := idx * 4
+		t = clampUnit(bezierCalc(t, splines[off], splines[off+1],
+			splines[off+2], splines[off+3]))
+	}
+	return idx, t, false
+}
+
+// locateSegKeyTimes walks keyTimes to find the segment covering
+// frac. Discrete: keyTimes[i] starts keyframe i. Linear/spline:
+// intra-segment t is (frac-keyTimes[i]) / (keyTimes[i+1]-
+// keyTimes[i]); zero-width segments (duplicate keyTimes) yield
+// t=0 (jump to upper keyframe — matches SMIL discrete-boundary).
+func locateSegKeyTimes(
+	n int, frac float32, splines, keyTimes []float32,
+	mode SvgAnimCalcMode,
+) (int, float32, bool) {
+	if frac >= keyTimes[n-1] {
+		return n - 1, 0, true
+	}
+	idx := 0
+	for i := 0; i < n-1; i++ {
+		if frac >= keyTimes[i] && frac < keyTimes[i+1] {
+			idx = i
+			break
+		}
+	}
+	if mode == SvgAnimCalcDiscrete {
+		return idx, 0, false
+	}
+	span := keyTimes[idx+1] - keyTimes[idx]
+	var t float32
+	if span > 0 {
+		t = (frac - keyTimes[idx]) / span
+	}
+	if mode == SvgAnimCalcSpline && len(splines) == 4*(n-1) {
+		off := idx * 4
+		t = clampUnit(bezierCalc(t, splines[off], splines[off+1],
+			splines[off+2], splines[off+3]))
+	}
+	return idx, t, false
+}
+
+// blendAlpha multiplies two 0..255 alpha channels as if they were
+// in [0,1], rounding toward zero. Used to fold a tint alpha into
+// the path's baked alpha without losing per-element opacity.
+func blendAlpha(a, b uint8) uint8 {
+	return uint8(uint16(a) * uint16(b) / 255)
+}
+
+// emitErrorPlaceholder draws a magenta rectangle placeholder.
+func emitErrorPlaceholder(x, y, w, h float32, win *Window) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	emitRenderer(RenderCmd{
+		Kind:  RenderRect,
+		X:     x,
+		Y:     y,
+		W:     w,
+		H:     h,
+		Color: magenta,
+		Fill:  true,
+	}, win)
+	emitRenderer(RenderCmd{
+		Kind:      RenderStrokeRect,
+		X:         x,
+		Y:         y,
+		W:         w,
+		H:         h,
+		Color:     White,
+		Thickness: 1,
+	}, win)
+}

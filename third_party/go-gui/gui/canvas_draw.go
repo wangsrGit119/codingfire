@@ -1,0 +1,740 @@
+package gui
+
+import "math"
+
+// DrawContext is passed to the OnDraw callback. Drawing methods
+// append tessellated triangle batches which are later emitted as
+// RenderSvg commands. Text methods append deferred text entries
+// emitted as RenderText commands.
+type DrawContext struct {
+	textMeasure TextMeasurer
+	recorder    DrawRecorder
+	batches     []DrawCanvasTriBatch
+	// batchPool is the previous redraw's batch list, handed in by
+	// renderDrawCanvas so this pass can claim the triangle and color
+	// buffers it left behind instead of allocating fresh ones. Nil for
+	// a context the caller built directly, which then behaves exactly
+	// as it did before pooling existed.
+	batchPool []DrawCanvasTriBatch
+	// gradients holds radial fills lowered to a shader quad, and
+	// gradientPool is the previous redraw's list, handed in for its
+	// stop buffers exactly as batchPool is for its triangles.
+	gradients       []DrawCanvasGradientEntry
+	gradientPool    []DrawCanvasGradientEntry
+	texts           []DrawCanvasTextEntry
+	images          []DrawCanvasImageEntry
+	arcBuf          []float32
+	bezierBuf       []float32
+	roundRectBuf    []float32
+	joinNormalBuf   []strokeVec
+	joinOffsetBuf   []strokeOffset
+	gradTriBuf      []float32
+	gradSplitBuf    []float32
+	gradRadialBuf   []float32
+	gradIsolineBuf  []float32
+	gradOffsetBuf   []float32
+	gradStopBuf     []GradientStop
+	gradSampleBuf   []GradientStop
+	gradRampBuf     []gradRampSegment
+	gradRingBuf     []gradRing
+	lineBuf         [4]float32
+	currentBatchIdx int
+	Width           float32
+	Height          float32
+	// Scale is the device pixel ratio (e.g. 2.0 on Retina/HiDPI displays).
+	// Width and Height are in logical pixels; multiply by Scale to get device pixels.
+	// Always > 0; defaults to 1.0 when the backend has not reported a valid scale.
+	Scale float32
+
+	// xf is the active translate+scale, xfStack the Save/Restore
+	// stack, and xfActive the gate that keeps a zero-value
+	// DrawContext behaving as an untransformed one. xfDropped counts
+	// the Saves past maxXformDepth that were not stored, so their
+	// Restores can be no-ops instead of popping an ancestor.
+	// xfPtBuf holds a transformed copy of a caller's point slice on
+	// the recorder path, and xfRec is the lazily built recorder
+	// decorator. See canvas_draw_transform.go.
+	xf        canvasXform
+	xfStack   []canvasXform
+	xfPtBuf   []float32
+	xfRec     *xformRecorder
+	xfDropped int
+	xfActive  bool
+
+	lastColor Color
+	// batchIsGradient closes the current batch to the run-length merge.
+	// It is set for a vertex-colored batch — a flat fill must never
+	// append its triangles to a batch carrying per-vertex colors, or the
+	// batch's two lengths stop agreeing — and by breakBatchRun for a
+	// lowered gradient, which records no batch but does take a position
+	// in the emit order.
+	batchIsGradient bool
+}
+
+// SetRecorder attaches a DrawRecorder that receives high-level
+// draw commands in addition to normal tessellation.
+func (dc *DrawContext) SetRecorder(r DrawRecorder) { dc.recorder = r }
+
+func (dc *DrawContext) getBatch(color Color) *DrawCanvasTriBatch {
+	// The transform joins the run-length merge key: a batch carries
+	// one matrix for all its triangles, so a transform change must
+	// start a new batch. Compared against the live batch rather than
+	// a mirror field so there is one source of truth.
+	xf, hasXf := dc.activeXform()
+	if len(dc.batches) > 0 && !dc.batchIsGradient &&
+		dc.lastColor == color &&
+		dc.batches[dc.currentBatchIdx].hasXform == hasXf &&
+		dc.batches[dc.currentBatchIdx].xf == xf {
+		return &dc.batches[dc.currentBatchIdx]
+	}
+	b := dc.takeBatch(color, false, defaultBatchVerts)
+	dc.lastColor = color
+	dc.batchIsGradient = false
+	return b
+}
+
+// FilledRect draws a filled rectangle as two triangles.
+func (dc *DrawContext) FilledRect(x, y, w, h float32, color Color) {
+	if w <= 0 || h <= 0 || !f32AllFinite4(x, y, w, h) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().FilledRect(x, y, w, h, color)
+		return
+	}
+	b := dc.getBatch(color)
+	b.Triangles = append(b.Triangles,
+		x, y,
+		x+w, y,
+		x+w, y+h,
+		x, y,
+		x+w, y+h,
+		x, y+h,
+	)
+}
+
+// Line draws a single line segment.
+func (dc *DrawContext) Line(x0, y0, x1, y1 float32, color Color, width float32) {
+	if dc.recorder != nil {
+		dc.rec().Line(x0, y0, x1, y1, color, width)
+		return
+	}
+	// Through a reused array rather than a literal: Polyline hands its
+	// points to dc.recorder, so the parameter escapes and a literal
+	// here heap-allocates on every call — even on this branch, which
+	// has already established there is no recorder.
+	dc.lineBuf = [4]float32{x0, y0, x1, y1}
+	dc.Polyline(dc.lineBuf[:], color, width)
+}
+
+// Polyline draws a stroked open polyline using simple
+// per-segment rectangle expansion (no joins/caps).
+func (dc *DrawContext) Polyline(points []float32, color Color, width float32) {
+	if len(points) < 4 || width <= 0 || !f32IsFinite(width) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().Polyline(points, color, width)
+		return
+	}
+	hw := width / 2
+	b := dc.getBatch(color)
+	for i := 0; i+3 < len(points); i += 2 {
+		x0, y0 := points[i], points[i+1]
+		x1, y1 := points[i+2], points[i+3]
+		// Screened per segment rather than over the whole list: one bad
+		// point costs its two segments, and the rest of the polyline
+		// still draws. A non-finite vertex reaching the batch would cost
+		// far more than this primitive — validSvgCmd drops the whole
+		// command, and the run-length merge means the batch holds
+		// everything else drawn in the same color.
+		if !f32AllFinite4(x0, y0, x1, y1) {
+			continue
+		}
+		dx := x1 - x0
+		dy := y1 - y0
+		ln := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+		if ln < 1e-6 {
+			continue
+		}
+		// Perpendicular offset.
+		nx := -dy / ln * hw
+		ny := dx / ln * hw
+		// Quad as two triangles.
+		b.Triangles = append(b.Triangles,
+			x0+nx, y0+ny,
+			x0-nx, y0-ny,
+			x1-nx, y1-ny,
+			x0+nx, y0+ny,
+			x1-nx, y1-ny,
+			x1+nx, y1+ny,
+		)
+	}
+}
+
+// Rect draws a stroked rectangle using four axis-aligned quads
+// with overlap at corners. Overlap may cause alpha artifacts
+// with transparent colors.
+func (dc *DrawContext) Rect(x, y, w, h float32, color Color, width float32) {
+	if w <= 0 || h <= 0 || width <= 0 || !f32AllFinite5(x, y, w, h, width) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().Rect(x, y, w, h, color, width)
+		return
+	}
+	hw := width / 2
+	b := dc.getBatch(color)
+	// Top.
+	b.Triangles = append(b.Triangles,
+		x-hw, y-hw, x+w+hw, y-hw, x+w+hw, y+hw,
+		x-hw, y-hw, x+w+hw, y+hw, x-hw, y+hw,
+	)
+	// Bottom.
+	b.Triangles = append(b.Triangles,
+		x-hw, y+h-hw, x+w+hw, y+h-hw, x+w+hw, y+h+hw,
+		x-hw, y+h-hw, x+w+hw, y+h+hw, x-hw, y+h+hw,
+	)
+	// Left.
+	b.Triangles = append(b.Triangles,
+		x-hw, y-hw, x+hw, y-hw, x+hw, y+h+hw,
+		x-hw, y-hw, x+hw, y+h+hw, x-hw, y+h+hw,
+	)
+	// Right.
+	b.Triangles = append(b.Triangles,
+		x+w-hw, y-hw, x+w+hw, y-hw, x+w+hw, y+h+hw,
+		x+w-hw, y-hw, x+w+hw, y+h+hw, x+w-hw, y+h+hw,
+	)
+}
+
+// FilledPolygon draws a filled convex polygon using fan from
+// first vertex.
+func (dc *DrawContext) FilledPolygon(points []float32, color Color) {
+	if len(points) < 6 {
+		return
+	}
+	// A fan shares its first vertex with every triangle, so one bad
+	// point can poison the whole polygon. Screen the list and drop the
+	// primitive rather than emitting a partial shape.
+	if !f32AllFinite(points) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().FilledPolygon(points, color)
+		return
+	}
+	b := dc.getBatch(color)
+	appendPolygonFanTris(&b.Triangles, points)
+}
+
+// FilledCircle draws a filled circle.
+func (dc *DrawContext) FilledCircle(cx, cy, radius float32, color Color) {
+	if dc.recorder != nil {
+		dc.rec().FilledCircle(cx, cy, radius, color)
+		return
+	}
+	dc.FilledArc(cx, cy, radius, radius, 0, 2*math.Pi, color)
+}
+
+// Circle draws a stroked circle.
+func (dc *DrawContext) Circle(cx, cy, radius float32, color Color, width float32) {
+	if dc.recorder != nil {
+		dc.rec().Circle(cx, cy, radius, color, width)
+		return
+	}
+	dc.Arc(cx, cy, radius, radius, 0, 2*math.Pi, color, width)
+}
+
+// Arc draws a stroked elliptical arc.
+func (dc *DrawContext) Arc(cx, cy, rx, ry, start, sweep float32, color Color, width float32) {
+	if width <= 0 || !f32IsFinite(width) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().Arc(cx, cy, rx, ry, start, sweep, color, width)
+		return
+	}
+	pts := dc.arcPoints(cx, cy, rx, ry, start, sweep)
+	if len(pts) >= 4 {
+		dc.Polyline(pts, color, width)
+	}
+}
+
+// FilledArc draws a filled elliptical arc (pie slice).
+// Emits fan triangles directly from center to arc points,
+// avoiding an intermediate polygon allocation.
+func (dc *DrawContext) FilledArc(cx, cy, rx, ry, start, sweep float32, color Color) {
+	if dc.recorder != nil {
+		dc.rec().FilledArc(cx, cy, rx, ry, start, sweep, color)
+		return
+	}
+	pts := dc.arcPoints(cx, cy, rx, ry, start, sweep)
+	if len(pts) < 4 {
+		return
+	}
+	b := dc.getBatch(color)
+	appendArcFanTris(&b.Triangles, cx, cy, pts)
+}
+
+// maxArcSegments caps the segment count arcPoints will produce, bounding both the
+// per-call work and the reused dc.arcBuf.
+const maxArcSegments = 4096
+
+// arcPoints is the buffer-reusing version of arcToPolyline.
+// Writes into dc.arcBuf and returns the populated slice.
+func (dc *DrawContext) arcPoints(cx, cy, rx, ry, start, sweep float32) []float32 {
+	// NaN fails every ordered comparison, so r <= 0 below would let it through and
+	// math.Ceil(NaN) -> int is undefined in Go. Screen first, and no-op the way the
+	// r <= 0 case does — every caller already guards on len(pts).
+	if !f32IsFinite(cx) || !f32IsFinite(cy) ||
+		!f32IsFinite(rx) || !f32IsFinite(ry) ||
+		!f32IsFinite(start) || !f32IsFinite(sweep) {
+		return nil
+	}
+	r := rx
+	r = max(r, ry)
+	if r <= 0 {
+		return nil
+	}
+	// Past a full turn the arc retraces itself, so a clamped sweep draws the same
+	// pixels. Clamp the sweep rather than only the segment count: the count alone
+	// would leave step = sweep/n at whatever the caller passed (an unwrapped
+	// rotation accumulator reaches 1e6 rad), which draws bounded garbage.
+	if f32Abs(sweep) > 2*math.Pi {
+		sweep = float32(math.Copysign(2*math.Pi, float64(sweep)))
+	}
+	// With sweep clamped the density term alone drives the count, and it only
+	// reaches the ceiling near r = 200,000 px — far past any visible improvement.
+	// The cap also bounds the retained dc.arcBuf at ~32 KB, so it needs no shrink.
+	// Clamp in float64: a finite r can still be 3.4e38, whose segment count is past
+	// int64, and an out-of-range float-to-int conversion is undefined in Go.
+	segs := math.Ceil(
+		float64(f32Abs(sweep)) / (2 * math.Pi) * 64 *
+			math.Sqrt(float64(r)/50+1))
+	n := max(int(min(segs, maxArcSegments)), 4)
+	need := (n + 1) * 2
+	if cap(dc.arcBuf) < need {
+		dc.arcBuf = make([]float32, 0, need)
+	}
+	dc.arcBuf = dc.arcBuf[:0]
+	step := sweep / float32(n)
+	for i := 0; i <= n; i++ {
+		a := float64(start + step*float32(i))
+		dc.arcBuf = append(dc.arcBuf,
+			cx+rx*float32(math.Cos(a)),
+			cy+ry*float32(math.Sin(a)))
+	}
+	return dc.arcBuf
+}
+
+// FilledRoundedRect draws a filled rectangle with rounded corners.
+// Radius is clamped to half the smaller dimension.
+func (dc *DrawContext) FilledRoundedRect(x, y, w, h, radius float32, color Color) {
+	if w <= 0 || h <= 0 || !f32AllFinite5(x, y, w, h, radius) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().FilledRoundedRect(x, y, w, h, radius, color)
+		return
+	}
+	radius = min(radius, w/2, h/2)
+	if radius <= 0 {
+		dc.FilledRect(x, y, w, h, color)
+		return
+	}
+	b := dc.getBatch(color)
+	appendRoundedRectTris(&b.Triangles, x, y, w, h, radius)
+}
+
+// RoundedRect draws a stroked rectangle with rounded corners.
+func (dc *DrawContext) RoundedRect(x, y, w, h, radius float32, color Color, width float32) {
+	if w <= 0 || h <= 0 || width <= 0 || !f32AllFinite6(x, y, w, h, radius, width) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().RoundedRect(x, y, w, h, radius, color, width)
+		return
+	}
+	radius = min(radius, w/2, h/2)
+	if radius <= 0 {
+		dc.Rect(x, y, w, h, color, width)
+		return
+	}
+	r := radius
+	// Build polyline: top → TR arc → right → BR arc → bottom →
+	// BL arc → left → TL arc → close.
+	//
+	// Into a pooled buffer, not a fresh slice: this runs once per
+	// rounded rect per frame on an animated canvas, and the length is
+	// the same every time.
+	const segs = 8
+	pts := dc.roundRectBuf[:0]
+	// Top-left corner arc.
+	pts = appendArcPoints(pts, x+r, y+r, r, math.Pi, segs)
+	// Top-right corner arc.
+	pts = appendArcPoints(pts, x+w-r, y+r, r, 3*math.Pi/2, segs)
+	// Bottom-right corner arc.
+	pts = appendArcPoints(pts, x+w-r, y+h-r, r, 0, segs)
+	// Bottom-left corner arc.
+	pts = appendArcPoints(pts, x+r, y+h-r, r, math.Pi/2, segs)
+	// Close the shape.
+	pts = append(pts, pts[0], pts[1])
+	dc.roundRectBuf = pts
+	dc.Polyline(pts, color, width)
+}
+
+// strokeVec is a segment normal and strokeOffset the left/right pair
+// of stroke boundary points at one vertex. Named types at package
+// scope rather than inside PolylineJoined so its two working lists can
+// live on the DrawContext and be reused across redraws.
+type strokeVec struct{ x, y float32 }
+
+type strokeOffset struct{ lx, ly, rx, ry float32 }
+
+// PolylineJoined draws a stroked polyline with miter joins
+// at vertices. Falls back to bevel when the miter exceeds
+// 4× the half-width.
+func (dc *DrawContext) PolylineJoined(
+	points []float32, color Color, width float32,
+) {
+	n := len(points) / 2
+	if n < 2 || width <= 0 || !f32IsFinite(width) {
+		return
+	}
+	// Miter joins carry a bad point into its neighbours' offsets, so
+	// the screen is over the whole list rather than per segment.
+	if !f32AllFinite(points) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().PolylineJoined(points, color, width)
+		return
+	}
+	hw := width / 2
+	const miterLimit = 4.0
+	b := dc.getBatch(color)
+
+	// Compute perpendicular normals per segment, into pooled buffers:
+	// a joined polyline is the shape a chart or a map redraws every
+	// frame, and both lists are re-derived at the same length each time.
+	normals := dc.joinNormalBuf[:0]
+	for i := 0; i < n-1; i++ {
+		dx := points[(i+1)*2] - points[i*2]
+		dy := points[(i+1)*2+1] - points[i*2+1]
+		ln := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+		if ln < 1e-6 {
+			normals = append(normals, strokeVec{0, 0})
+			continue
+		}
+		normals = append(normals, strokeVec{-dy / ln, dx / ln})
+	}
+	dc.joinNormalBuf = normals
+
+	// Compute offset points (left/right) at each vertex.
+	offsets := dc.joinOffsetBuf[:0]
+	if cap(offsets) < n {
+		offsets = make([]strokeOffset, n)
+	}
+	offsets = offsets[:n]
+	dc.joinOffsetBuf = offsets
+
+	// First vertex: use first segment normal.
+	offsets[0] = strokeOffset{
+		lx: points[0] + normals[0].x*hw,
+		ly: points[1] + normals[0].y*hw,
+		rx: points[0] - normals[0].x*hw,
+		ry: points[1] - normals[0].y*hw,
+	}
+	// Last vertex: use last segment normal.
+	last := n - 1
+	li := len(normals) - 1
+	offsets[last] = strokeOffset{
+		lx: points[last*2] + normals[li].x*hw,
+		ly: points[last*2+1] + normals[li].y*hw,
+		rx: points[last*2] - normals[li].x*hw,
+		ry: points[last*2+1] - normals[li].y*hw,
+	}
+
+	// Interior vertices: miter join.
+	for i := 1; i < last; i++ {
+		n0 := normals[i-1]
+		n1 := normals[i]
+		if (n0 == strokeVec{0, 0}) || (n1 == strokeVec{0, 0}) {
+			// Degenerate segment, use whichever is valid.
+			nv := n0
+			if nv == (strokeVec{0, 0}) {
+				nv = n1
+			}
+			offsets[i] = strokeOffset{
+				lx: points[i*2] + nv.x*hw,
+				ly: points[i*2+1] + nv.y*hw,
+				rx: points[i*2] - nv.x*hw,
+				ry: points[i*2+1] - nv.y*hw,
+			}
+			continue
+		}
+		// Average normal direction.
+		mx := n0.x + n1.x
+		my := n0.y + n1.y
+		ml := float32(math.Sqrt(float64(mx*mx + my*my)))
+		if ml < 1e-6 {
+			// Nearly opposite normals — bevel.
+			offsets[i] = strokeOffset{
+				lx: points[i*2] + n1.x*hw,
+				ly: points[i*2+1] + n1.y*hw,
+				rx: points[i*2] - n1.x*hw,
+				ry: points[i*2+1] - n1.y*hw,
+			}
+			continue
+		}
+		mx /= ml
+		my /= ml
+		// Miter length = hw / dot(miter, normal).
+		dot := mx*n0.x + my*n0.y
+		if f32Abs(dot) < 1e-6 {
+			dot = 1e-6
+		}
+		miterLen := hw / dot
+		if f32Abs(miterLen) > hw*miterLimit {
+			// Exceeds miter limit — bevel.
+			miterLen = hw
+			mx = n1.x
+			my = n1.y
+		}
+		offsets[i] = strokeOffset{
+			lx: points[i*2] + mx*miterLen,
+			ly: points[i*2+1] + my*miterLen,
+			rx: points[i*2] - mx*miterLen,
+			ry: points[i*2+1] - my*miterLen,
+		}
+	}
+
+	// Emit quads between consecutive offset pairs.
+	for i := 0; i < n-1; i++ {
+		a := offsets[i]
+		c := offsets[i+1]
+		b.Triangles = append(b.Triangles,
+			a.lx, a.ly, a.rx, a.ry, c.rx, c.ry,
+			a.lx, a.ly, c.rx, c.ry, c.lx, c.ly,
+		)
+	}
+}
+
+func (dc *DrawContext) resetBezierBuf(x0, y0 float32) []float32 {
+	if cap(dc.bezierBuf) < 64 {
+		dc.bezierBuf = make([]float32, 0, 64)
+	}
+	return append(dc.bezierBuf[:0], x0, y0)
+}
+
+// QuadBezier draws a stroked quadratic Bezier curve defined by
+// start (x0,y0), control (cx,cy) and end (x1,y1).
+func (dc *DrawContext) QuadBezier(
+	x0, y0, cx, cy, x1, y1 float32, color Color, width float32,
+) {
+	if width <= 0 || !f32AllFinite7(x0, y0, cx, cy, x1, y1, width) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().QuadBezier(x0, y0, cx, cy, x1, y1, color, width)
+		return
+	}
+	dc.bezierBuf = dc.resetBezierBuf(x0, y0)
+	flattenQuadBezier(&dc.bezierBuf, x0, y0, cx, cy, x1, y1,
+		bezierTol, 0)
+	if len(dc.bezierBuf) >= 4 {
+		dc.Polyline(dc.bezierBuf, color, width)
+	}
+}
+
+// CubicBezier draws a stroked cubic Bezier curve defined by
+// start (x0,y0), controls (c1x,c1y) (c2x,c2y) and end (x1,y1).
+func (dc *DrawContext) CubicBezier(
+	x0, y0, c1x, c1y, c2x, c2y, x1, y1 float32,
+	color Color, width float32,
+) {
+	if width <= 0 ||
+		!f32AllFinite9(x0, y0, c1x, c1y, c2x, c2y, x1, y1, width) {
+		return
+	}
+	if dc.recorder != nil {
+		dc.rec().CubicBezier(x0, y0, c1x, c1y, c2x, c2y, x1, y1,
+			color, width)
+		return
+	}
+	dc.bezierBuf = dc.resetBezierBuf(x0, y0)
+	flattenCubicBezier(&dc.bezierBuf, x0, y0, c1x, c1y, c2x, c2y,
+		x1, y1, bezierTol, 0)
+	if len(dc.bezierBuf) >= 4 {
+		dc.Polyline(dc.bezierBuf, color, width)
+	}
+}
+
+// Text draws text at the given position using the specified style.
+// The position is the top-left of the text bounding box.
+func (dc *DrawContext) Text(x, y float32, text string, style TextStyle) {
+	if dc.recorder != nil {
+		dc.rec().Text(x, y, text, style)
+		return
+	}
+	// Text bakes: RenderText has no xform fields to ride on, and Text
+	// is a leaf — no primitive delegates to it, so this cannot
+	// double-apply.
+	//
+	// The recorded values are screened, which the other primitives
+	// leave to the render-command validation downstream. Text cannot:
+	// the emit path measures the style through the glyph shaper to get
+	// its ascent and width BEFORE validTextCmd runs, and that check
+	// never looks at Size, so an infinite font size would reach the
+	// shaper's cache and rasterizer. A large-but-finite scale is enough
+	// to get there — 12 * 1e38 overflows without the transform itself
+	// ever being non-finite — and so is a non-finite argument passed
+	// with no transform in force. Every px-valued field
+	// scaleTextStyle touches is checked, including the cell and
+	// emoji-box widths the shaper reads through glyphconv.
+	if _, ok := dc.activeXform(); ok {
+		x, y = dc.xf.apply(x, y)
+		style = dc.xf.scaleTextStyle(style)
+	}
+	if !f32AllFinite9(x, y, style.Size, style.LineSpacing,
+		style.StrokeWidth, style.LetterSpacing,
+		style.CellWidth, style.CellHeight, style.EmojiBoxWidth) {
+		return
+	}
+	dc.texts = append(dc.texts, DrawCanvasTextEntry{
+		X: x, Y: y, Text: text, Style: style,
+	})
+}
+
+// TextWidth returns the measured width of text in the given style.
+// Returns 0 when no text measurer is available (e.g. in tests).
+func (dc *DrawContext) TextWidth(text string, style TextStyle) float32 {
+	if dc.textMeasure == nil {
+		return 0
+	}
+	return dc.textMeasure.TextWidth(text, style)
+}
+
+// FontHeight returns the line height for the given text style.
+// Falls back to Style.Size when no measurer is available.
+func (dc *DrawContext) FontHeight(style TextStyle) float32 {
+	if dc.textMeasure == nil {
+		return style.Size
+	}
+	return dc.textMeasure.FontHeight(style)
+}
+
+// Image draws an image at the given rectangle. Src accepts the
+// same forms as ImageCfg.Src (local path, http/https URL, data URL).
+// BgOpacity modulates the BgColor alpha; it does not fade the image
+// texture itself. BgColor paints behind the image (useful for PNGs
+// with transparency); zero value is transparent. Remote fetches use
+// WindowCfg.ImageFetcher; use ImageWithFetcher to override per call.
+func (dc *DrawContext) Image(
+	x, y, w, h float32, src string,
+	bgOpacity Opt[float32], bgColor Color,
+) {
+	dc.ImageWithFetcher(x, y, w, h, src, bgOpacity, bgColor, nil)
+}
+
+// ImageWithFetcher is Image plus a per-call override of the remote
+// fetcher. nil fetcher falls back to WindowCfg.ImageFetcher, matching
+// Image's behavior exactly. Typical use is map rendering where each
+// tile layer's Source supplies its own policy-compliant User-Agent.
+// See DrawCanvasImageEntry.Fetcher on the URL-keyed dedup limit.
+func (dc *DrawContext) ImageWithFetcher(
+	x, y, w, h float32, src string,
+	bgOpacity Opt[float32], bgColor Color,
+	fetcher ImageFetcher,
+) {
+	if w <= 0 || h <= 0 || src == "" {
+		return
+	}
+	if !f32IsFinite(x) || !f32IsFinite(y) ||
+		!f32IsFinite(w) || !f32IsFinite(h) {
+		return
+	}
+	if dc.recorder != nil {
+		if ir, ok := dc.imageRecorder(); ok {
+			ir.Image(x, y, w, h, src, bgOpacity, bgColor)
+			return
+		}
+	}
+	// Baked and normalized: a negative scale must land the rect at
+	// the mirrored position with positive extents, or the w <= 0
+	// guard in emitDrawCanvasImages drops it. Image content is never
+	// mirrored. The finite guards above deliberately ran on the
+	// caller's values.
+	x, y, w, h = dc.xfRect(x, y, w, h)
+	dc.images = append(dc.images, DrawCanvasImageEntry{
+		X: x, Y: y, W: w, H: h,
+		Src: src, bgOpacity: bgOpacity, BgColor: bgColor,
+		fetcher: fetcher,
+	})
+}
+
+// ImageClipped is Image restricted to a sub-rectangle: the image
+// still maps to the full x/y/w/h rect, but only the part inside
+// clipX/clipY/clipW/clipH is painted. The clip is intersected with
+// the canvas's own clip, and is in the same content-relative
+// coordinates as x/y.
+//
+// It exists for consumers that must show a fragment of an image
+// without cropping the source file — a terminal emulator painting
+// the visible tiles of an image whose remaining cells are scrolled
+// behind another pane, for instance. Recorders (SVG/PDF export) see
+// the unclipped image: they capture structure, not scissor state.
+func (dc *DrawContext) ImageClipped(
+	x, y, w, h float32, src string,
+	bgOpacity Opt[float32], bgColor Color,
+	clipX, clipY, clipW, clipH float32,
+) {
+	if clipW <= 0 || clipH <= 0 ||
+		!f32IsFinite(clipX) || !f32IsFinite(clipY) ||
+		!f32IsFinite(clipW) || !f32IsFinite(clipH) {
+		return
+	}
+	before := len(dc.images)
+	dc.ImageWithFetcher(x, y, w, h, src, bgOpacity, bgColor, nil)
+	if len(dc.images) == before {
+		return // rejected (bad geometry) or routed to a recorder
+	}
+	e := &dc.images[len(dc.images)-1]
+	// The image rect was baked by ImageWithFetcher; the clip rect is
+	// in the same local space and bakes here.
+	e.ClipX, e.ClipY, e.ClipW, e.ClipH = dc.xfRect(clipX, clipY, clipW, clipH)
+	e.Clipped = true
+}
+
+// Texts returns accumulated text entries. Useful for testing
+// DrawCanvas output.
+func (dc *DrawContext) Texts() []DrawCanvasTextEntry {
+	return dc.texts
+}
+
+// Images returns accumulated image entries. Useful for testing
+// DrawCanvas output.
+func (dc *DrawContext) Images() []DrawCanvasImageEntry {
+	return dc.images
+}
+
+// Batches returns accumulated triangle batches. Useful for
+// testing DrawCanvas output.
+func (dc *DrawContext) Batches() []DrawCanvasTriBatch {
+	return dc.batches
+}
+
+// Gradients returns the radial fills this context lowered to shader
+// quads instead of tessellating. A consumer counting what a canvas
+// produced needs both this and Batches: a concentric radial fill
+// appears in exactly one of them.
+// exportaudit:keep — dev/test observability, paired with Batches
+func (dc *DrawContext) Gradients() []DrawCanvasGradientEntry {
+	return dc.gradients
+}
+
+// NewDrawContext creates a DrawContext for headless rendering.
+// tm may be nil when text measurement is not required.
+func NewDrawContext(w, h float32, tm TextMeasurer) *DrawContext {
+	return &DrawContext{Width: w, Height: h, textMeasure: tm}
+}

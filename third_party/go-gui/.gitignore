@@ -1,0 +1,117 @@
+# ignore all
+*
+# unignore files with extensions
+!*.*
+# unignore all dirs
+!*/
+### Above combination will ignore all files without extension
+
+# Build outputs belong in build/ or examples/bin/ — never the repo root.
+# The catch-all above already ignores extensionless binaries, but these
+# strays were built with a bare `go build` before -o conventions existed.
+# `make clean` removes them; do not recreate them. Add new tool/example
+# binaries here if one slips through.
+/showcase
+/fontviewer
+/listbox
+/get_started
+/command_demo
+/process_monitor
+/scroll_demo
+/depsdoc
+/exportaudit
+/ergonomics-audit
+/readme_check
+
+!Makefile
+!LICENSE
+!.githooks/pre-commit
+!.githooks/pre-push
+
+# Binaries
+main
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Built example binaries
+examples/bin/
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Software-rasterizer captures. examples/headless_png writes headless.png
+# into the working directory when run with no argument; assets/*.png are
+# tracked, so this stays anchored to the repo root.
+/headless.png
+
+# Pixel-golden failure artifacts, written by TestPixelGolden on a
+# mismatch and uploaded by CI. Committed references live alongside.
+gui/backend/soft/testdata/failures/
+
+# iOS c-archive build artifacts
+*.a
+examples/ios_demo/ios/libgoguiapp.h
+
+# WASM build artifacts
+*.wasm
+wasm_exec.js
+
+# npm
+package-lock.json
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directory
+vendor/
+.claude/
+
+# Agent/editor tool config (local only)
+.antigravitycli/
+.windsurf/
+.windsurfrules
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+# Release archives written by `make package-*`.
+dist/
+
+# Serena
+.serena/
+
+# Graphify
+graphify-out/
+
+# TokenSave
+.tokensave/
+
+# Anitivibe
+deep-dive/
+
+
+.direnv/
+.tokensave/
+.codegraph/
+.codehound-cache/
+.goslop-cache/
+
+# Pinned linter binary, built by `make lint` from tools/lint.
+/.bin/

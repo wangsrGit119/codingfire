@@ -1,0 +1,242 @@
+package gui
+
+import "time"
+
+// tooltipState tracks active tooltip bounds and ID.
+type tooltipState struct {
+	hoverStart   time.Time // when hover began
+	id           string
+	popupID      string   // cached popup ID string
+	hoverID      string   // trigger currently hovered
+	text         string   // RTF tooltip content
+	blockKey     uint64   // FNV hash of owning RichText
+	bounds       drawClip // absolute run bounds (mouse check)
+	floatOffsetX float32  // run-relative X for float popup
+	floatOffsetY float32  // run-relative Y for float popup
+}
+
+// clearText resets RTF-sourced tooltip state. No-op when
+// text is empty so WithTooltip-managed state is preserved.
+func (ts *tooltipState) clearText() {
+	if ts.text == "" {
+		return
+	}
+	ts.hoverID = ""
+	ts.hoverStart = time.Time{}
+	ts.id = ""
+	ts.popupID = ""
+	ts.text = ""
+	ts.bounds = drawClip{}
+	ts.floatOffsetX = 0
+	ts.floatOffsetY = 0
+	ts.blockKey = 0
+}
+
+// TooltipCfg configures a tooltip popup.
+// exportaudit:keep — reachable from an exported signature
+type TooltipCfg struct {
+	TextStyle   TextStyle
+	ID          string
+	Content     []View
+	Delay       time.Duration
+	FloatZIndex int
+	Padding     Padding
+	Radius      Opt[float32]
+	SizeBorder  Opt[float32]
+	OffsetX     Opt[float32]
+	OffsetY     Opt[float32]
+	Color       Color
+	ColorBorder Color
+	Anchor      Opt[floatAttach]
+	tieOff      Opt[floatAttach]
+}
+
+// Tooltip creates a floating tooltip view.
+// exportaudit:keep — collides with the tooltipState var
+func Tooltip(cfg TooltipCfg) View {
+	applyTooltipDefaults(&cfg)
+	d := &defaultTooltipStyle
+	return Column(ContainerCfg{
+		ID:            cfg.ID,
+		Float:         true,
+		FloatAutoFlip: true,
+		FloatAnchor:   cfg.Anchor.Get(FloatBottomCenter),
+		FloatTieOff:   cfg.tieOff.Get(FloatTopCenter),
+		FloatOffsetX:  cfg.OffsetX.Get(-3),
+		FloatOffsetY:  cfg.OffsetY.Get(-3),
+		FloatZIndex:   cfg.FloatZIndex,
+		Shadow:        d.Shadow,
+		Color:         cfg.Color,
+		ColorBorder:   cfg.ColorBorder,
+		SizeBorder:    SomeF(cfg.SizeBorder.Get(d.SizeBorder)),
+		Radius:        SomeF(cfg.Radius.Get(d.Radius)),
+		Padding:       cfg.Padding,
+		MaxWidth:      300,
+		Content:       cfg.Content,
+	})
+}
+
+// AnimationTooltip returns an Animate that checks mouse position
+// after a delay and activates the tooltip if the mouse is still
+// inside the trigger bounds.
+func animationTooltip(cfg TooltipCfg) *Animate {
+	delay := cfg.Delay
+	if delay == 0 {
+		delay = defaultTooltipStyle.Delay
+	}
+	id := cfg.ID
+	return &Animate{
+		AnimID: "___tooltip___",
+		Delay:  delay,
+		Callback: func(_ *Animate, w *Window) {
+			ts := &w.viewState.tooltip
+			b := ts.bounds
+			mx := w.viewState.mousePosX
+			my := w.viewState.mousePosY
+			if ts.hoverID == id &&
+				mx >= b.X && my >= b.Y &&
+				mx < b.X+b.Width && my < b.Y+b.Height {
+				ts.id = id
+				ts.popupID = ScopeID(id, "popup")
+			}
+		},
+	}
+}
+
+func applyTooltipDefaults(cfg *TooltipCfg) {
+	d := &defaultTooltipStyle
+	if !cfg.Color.IsSet() {
+		cfg.Color = d.Color
+	}
+	if !cfg.ColorBorder.IsSet() {
+		cfg.ColorBorder = d.ColorBorder
+	}
+	if !cfg.Padding.IsSet() {
+		cfg.Padding = d.Padding
+	}
+	if cfg.TextStyle == (TextStyle{}) {
+		cfg.TextStyle = d.TextStyle
+	}
+	if cfg.Delay == 0 {
+		cfg.Delay = d.Delay
+	}
+}
+
+// WithTooltipCfg configures a tooltip wrapper.
+type WithTooltipCfg struct {
+	ID      string
+	Text    string
+	Content []View
+	Delay   time.Duration
+	Anchor  Opt[floatAttach]
+	tieOff  Opt[floatAttach]
+}
+
+// WithTooltip wraps content and shows a tooltip on hover after
+// a delay. Tooltip state is managed via AmendLayout.
+//
+// The build is deferred to layout generation. It is load-bearing
+// rather than a style choice: withTooltipBuild resolves the tip ID
+// with [Window.EffID] and keys the hover state, the popup's own ID and
+// the AmendLayout closure on the result, and the generation-time ID
+// scope is only live while the framework descends the View tree.
+// Building here would resolve against the enclosing scope, so the same
+// label in two ID-bearing panels would share one hover entry. See
+// issue #528.
+func WithTooltip(_ *Window, cfg WithTooltipCfg) View {
+	return viewFunc(func(w *Window) View {
+		return withTooltipBuild(w, cfg)
+	})
+}
+
+// withTooltipBuild assembles the wrapper under the ID scope of the
+// panel it sits in.
+func withTooltipBuild(w *Window, cfg WithTooltipCfg) View {
+	tipID := cfg.ID
+	if tipID == "" {
+		tipID = cfg.Text
+	}
+	// Scope the tooltip's identity like any other widget key, so the
+	// same label used in two ID-bearing panels tracks hover separately.
+	// Both the state writes and the popup's shape ID derive from this
+	// one string, so they cannot disagree.
+	tipID = w.EffID(tipID)
+
+	delay := cfg.Delay
+	if delay == 0 {
+		delay = defaultTooltipStyle.Delay
+	}
+
+	anchor := cfg.Anchor.Get(FloatBottomCenter)
+	tieOff := cfg.tieOff.Get(FloatTopCenter)
+
+	content := make([]View, 0, len(cfg.Content)+1)
+	content = append(content, cfg.Content...)
+
+	ts := &w.viewState.tooltip
+	if ts.id == tipID {
+		content = append(content, Tooltip(TooltipCfg{
+			ID:     ts.popupID,
+			Anchor: Some(anchor),
+			tieOff: Some(tieOff),
+			Content: []View{
+				Text(TextCfg{
+					Text:      cfg.Text,
+					TextStyle: defaultTooltipStyle.TextStyle,
+					Mode:      TextModeWrap,
+				}),
+			},
+		}))
+	}
+
+	return Column(ContainerCfg{
+		A11YRole:    AccessRoleGroup,
+		A11YCfg:     A11YCfg{A11YDescription: cfg.Text},
+		SizeBorder:  NoBorder,
+		Content:     content,
+		AmendLayout: withTooltipAmend(tipID, delay),
+	})
+}
+
+// withTooltipAmend returns the AmendLayout callback for a
+// WithTooltip wrapper.
+func withTooltipAmend(
+	tipID string, delay time.Duration,
+) func(EventCtx) {
+	popupID := ScopeID(tipID, "popup")
+	return func(ctx EventCtx) {
+		ts := &ctx.Window.viewState.tooltip
+		mx := ctx.Window.viewState.mousePosX
+		my := ctx.Window.viewState.mousePosY
+		inside := mx >= ctx.Layout.Shape.X && my >= ctx.Layout.Shape.Y &&
+			mx < ctx.Layout.Shape.X+ctx.Layout.Shape.Width &&
+			my < ctx.Layout.Shape.Y+ctx.Layout.Shape.Height
+
+		switch {
+		case inside && ts.hoverID == "":
+			ts.hoverID = tipID
+			ts.hoverStart = time.Now()
+			ctx.Window.AnimationAdd(&Animate{
+				AnimID: "___tooltip___",
+				Delay:  delay,
+				Callback: func(_ *Animate, w *Window) {
+					if w.viewState.tooltip.hoverID == tipID {
+						w.viewState.tooltip.id = tipID
+						w.viewState.tooltip.popupID = popupID
+					}
+				},
+			})
+
+		case inside && ts.hoverID == tipID &&
+			time.Since(ts.hoverStart) >= delay:
+			ts.id = tipID
+			ts.popupID = popupID
+
+		case !inside && ts.hoverID == tipID:
+			ts.hoverID = ""
+			ts.hoverStart = time.Time{}
+			ts.id = ""
+			ts.popupID = ""
+		}
+	}
+}

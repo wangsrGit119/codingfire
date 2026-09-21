@@ -1,0 +1,93 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gocyclo
+    - modernize
+    - unused
+    - revive
+    - gocritic
+    - cyclop
+    - perfsprint
+    - gosmopolitan
+  settings:
+    errcheck:
+      # The Win32 syscall wrappers return GetLastError() as their third
+      # value, and syscall.Errno is a uintptr boxed into a non-nil error
+      # interface — a successful call yields Errno(0), which stringifies
+      # to "The operation completed successfully." and still compares
+      # != nil. So `if err != nil` is always true and is never a valid
+      # success test for these; the result code (r1) is. Call sites that
+      # care already gate on r1 and use the errno only on that failure
+      # path. Requiring a check here would mean writing one that lies.
+      # Both wrapper families are in use: syscall.LazyProc in filedialog/
+      # and sni/, golang.org/x/sys/windows.LazyProc in gl/.
+      exclude-functions:
+        - (*syscall.LazyProc).Call
+        - (*syscall.Proc).Call
+        - syscall.SyscallN
+        - (*golang.org/x/sys/windows.LazyProc).Call
+        - (*golang.org/x/sys/windows.Proc).Call
+    gocyclo:
+      min-complexity: 30
+    cyclop:
+      max-complexity: 50
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+    revive:
+      rules:
+        - name: exported
+        - name: if-return
+        - name: error-strings
+        - name: unexported-return
+  exclusions:
+    generated: lax
+    rules:
+      # glbind mirrors the C OpenGL API 1:1 so that call sites need no
+      # changes: SCREAMING_SNAKE enum names and one thin wrapper per entry
+      # point. Idiomatic Go naming and 100 per-symbol doc comments restating
+      # the GL reference pages would defeat that and hide the real content.
+      - path: gui/backend/internal/glbind/
+        text: "should have comment or be unexported"
+      - path: gui/backend/internal/glbind/
+        text: "ALL_CAPS|underscore"
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocyclo
+          - cyclop
+      - path: _test\.go
+        text: SA5011
+      - path: _test\.go
+        linters:
+          - gosmopolitan
+      - path: examples/
+        linters:
+          - gosmopolitan
+      - path: native_platform_noop\.go
+        linters:
+          - revive
+      - path: gui/backend/(gl|metal|ios|android)/
+        text: "unkeyed fields"
+      # SA4023 fires only under GOOS=js. os/exec is stubbed on wasm, so
+      # exec.LookPath always returns a non-nil error and staticcheck reads
+      # every `err != nil` guard around it as constant. process_monitor is
+      # the same shape one level up: its collect_other.go fallback always
+      # errors, so Collect's guard reads as constant too. Both guards are
+      # correct on the targets the code actually builds for -- buildapp is
+      # a macOS-only .app bundler -- and neither program is reachable from
+      # a wasm build. Surfaced by golangci-lint 2.13.1; 2.12 did not infer
+      # across the call.
+      - path: cmd/buildapp/
+        text: SA4023
+      - path: examples/process_monitor/
+        text: SA4023

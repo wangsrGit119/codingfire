@@ -1,0 +1,147 @@
+package gui
+
+import "time"
+
+// window_focus.go — keyboard focus management.
+
+// FocusID returns the current focus ID. The value is an effective ID,
+// so it is already in the form [Window.SetFocus] and [Layout.FindByID]
+// take.
+//
+// A lock-free atomic read, so a call from any other goroutine is safe
+// (writes still route through [Window.QueueCommand], since [Window.SetFocus]
+// takes the frame lock).
+func (w *Window) FocusID() string {
+	if v := w.viewState.focusID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// SetFocus sets the focused widget by its string ID. A real focus
+// change clears input selections window-wide; re-asserting the widget
+// that already holds focus leaves selections alone. Acquires w.mu
+// (focusID); the caret-blink animation is managed from the render
+// pass, not here (see syncBlinkCursor). Use ClearFocus to remove
+// focus. From any goroutine other than the main thread, use
+// [Window.QueueCommand] instead of calling this directly.
+//
+// effectiveID is the widget's effective ID: a leaf under an ID-bearing
+// ancestor is addressed by its full path ("detail:nav"), not by the
+// leaf its Cfg was written with. Read it back with [Window.ResolveID].
+// No existence check runs here — a View function may set focus before
+// the widget exists — so a misspelled or stale ID parks focus in the
+// void until the next frame's fixup moves it on. Turn on gui.Debug to
+// hear about it (DebugUnknownFocus), or assert with
+// (*Window).TestFindings in tests.
+func (w *Window) SetFocus(effectiveID string) {
+	w.lockForAPI("SetFocus")
+	defer w.mu.Unlock()
+	w.setFocusLocked(effectiveID)
+}
+
+// ClearFocus removes keyboard focus from any widget.
+func (w *Window) ClearFocus() {
+	w.SetFocus("")
+}
+
+func (w *Window) setFocusLocked(effectiveID string) {
+	prev := w.FocusID()
+	// Only a real focus *change* drops selections and clears the IME.
+	// Re-asserting focus on the widget that already holds it must leave
+	// an in-flight IME composition alone — see #156 — and, since #277,
+	// text selections too: consumers legitimately re-assert focus from
+	// inside their View function, which runs on every layout rebuild,
+	// so an unconditional selection clear wiped every nsInput selection
+	// window-wide on each re-assert. Real transitions still clear both.
+	if effectiveID != prev {
+		w.clearInputSelections()
+		w.imeClear()
+		// The a11y snapshot carries the focused index but no layout
+		// rebuild accompanies a focus change, so mark the tree dirty
+		// here or syncA11y would skip the push (issue #407).
+		w.a11y.dirty = true
+	}
+	w.viewState.focusID.Store(effectiveID)
+	if effectiveID != "" {
+		w.viewState.inputCursorOn.Store(true)
+	}
+	// The caret-blink animation is not started here. Whether the new
+	// widget draws a caret cannot be answered from an ID, and SetFocus
+	// is legitimately called from inside a View function, where
+	// w.layout still holds the previous frame and a newly created
+	// input is not in it yet. syncBlinkCursor decides it from the
+	// arranged tree each frame instead (gui/ime_context.go, issue
+	// #403).
+	// The platform IME is not switched here either, for the same
+	// reason: only an *editable text* context — the only thing an
+	// input method may be activated for — may claim it. syncIMEEditContext
+	// decides that from the arranged tree each frame (gui/ime_context.go,
+	// issue #393).
+}
+
+// fixupFocusLocked moves focus off a widget that can no longer take
+// it: disabled since the last frame, or gone from the tree entirely.
+// Runs once per full Update, after the arranged tree is composed and
+// before renderers build, so the frame never draws a focus ring for a
+// widget that cannot be reached, and the blur commit for the old field
+// fires on the following frame through the usual AmendLayout path.
+// A surviving focus ID is untouched: this is a repair pass, not a
+// traversal, and costs one findByID walk only while something holds
+// focus. Must run under w.mu; use SetFocus outside the frame pass.
+func (w *Window) fixupFocusLocked() {
+	id := w.FocusID()
+	if id == "" {
+		return
+	}
+	if ly, ok := w.layout.findByID(id); ok && ly.Shape.canTakeFocus() {
+		return
+	}
+	// The invalid ID is not among the tab candidates, so this lands on
+	// the first tab stop in DFS order; with no candidates at all the
+	// window ends unfocused rather than parked on a dead ID.
+	//
+	// The candidates for the repair are collected here instead of
+	// calling nextFocusable, which would repeat the same walk to
+	// collect the same set. focusFindNext with an ID outside the
+	// set returns the first candidate, which is exactly
+	// nextFocusable's answer for a dead ID.
+	candidates := w.scratch.focusCandidates.take(0)
+	defer func() { w.scratch.focusCandidates.put(candidates) }()
+	seen := w.scratch.focusSeen.take(0)
+	defer func() { w.scratch.focusSeen.put(seen) }()
+	collectFocusCandidates(&w.layout, &candidates, seen)
+	if next, ok := focusFindNext(candidates, id); ok {
+		w.setFocusLocked(next.idKey())
+		return
+	}
+	w.setFocusLocked("")
+}
+
+// resetBlinkCursorVisible resets the blink timer so the cursor
+// stays visible during typing and cursor movement.
+func resetBlinkCursorVisible(w *Window) {
+	w.animMu.Lock()
+	defer w.animMu.Unlock()
+	w.viewState.inputCursorOn.Store(true)
+	if a, ok := w.animations[blinkCursorAnimationID]; ok {
+		a.SetStart(time.Now())
+	}
+}
+
+// IsFocus tests if the given focus id equals the window's focus id.
+//
+// effectiveID is the widget's effective ID: a leaf under an ID-bearing
+// ancestor is addressed by its full path ("detail:nav"), not by the
+// leaf its Cfg was written with. Read it back with [Window.ResolveID].
+//
+// A lock-free atomic read like [Window.FocusID]: safe from any goroutine.
+func (w *Window) IsFocus(effectiveID string) bool {
+	id := w.FocusID()
+	return id != "" && id == effectiveID
+}
+
+// hasFocus returns true if the window has focus.
+func (w *Window) hasFocus() bool {
+	return w.focused
+}

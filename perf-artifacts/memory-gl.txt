@@ -1,0 +1,9 @@
+=== RUN   TestOverlayMemoryProbe
+    memory_probe_windows_test.go:50: {"gc":1,"goSysMiB":17.22093963623047,"heapInuseMiB":4.4296875,"heapMiB":2.7406997680664062,"privateMiB":54.70703125,"stage":"process-start","workingSetMiB":18.91015625}
+    memory_probe_windows_test.go:50: {"gc":10,"goSysMiB":18.80687713623047,"heapInuseMiB":6.328125,"heapMiB":4.7181396484375,"privateMiB":58.99609375,"stage":"store-loaded","workingSetMiB":24.5546875}
+    memory_probe_windows_test.go:50: {"gc":25,"goSysMiB":61.04125213623047,"heapInuseMiB":42.6640625,"heapMiB":40.606895446777344,"privateMiB":262.1796875,"stage":"flame","workingSetMiB":188.39453125}
+    memory_probe_windows_test.go:50: {"gc":27,"goSysMiB":89.29906463623047,"heapInuseMiB":74.3359375,"heapMiB":71.34176635742188,"privateMiB":290.16796875,"stage":"hover","workingSetMiB":220.61328125}
+    memory_probe_windows_test.go:50: {"gc":28,"goSysMiB":142.04906463623047,"heapInuseMiB":128.3515625,"heapMiB":124.52423858642578,"privateMiB":408.20703125,"stage":"console","workingSetMiB":304.4296875}
+    memory_probe_windows_test.go:50: {"gc":28,"goSysMiB":142.04906463623047,"heapInuseMiB":128.578125,"heapMiB":124.76012420654297,"privateMiB":358.1953125,"stage":"console-closed","workingSetMiB":270.1953125}
+--- PASS: TestOverlayMemoryProbe (16.26s)
+PASS

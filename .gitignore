@@ -1,0 +1,20 @@
+# Build output
+/dist/
+*.exe
+*.zip
+
+# Local verification artifacts from --dump / --render
+codingfire-dump.txt
+/preview/
+report.txt
+
+# Optional local toolchain (Roslyn-style drop-in)
+/_tools/
+
+# Local agent/workspace notes (not part of the project)
+.workbuddy-ai/
+
+# Scratch harnesses written while validating a change
+_*.ps1
+_*.txt
+/_wfcheck/

@@ -1,0 +1,472 @@
+package gui
+
+import (
+	"log"
+	"time"
+
+	"github.com/go-gui-org/go-glyph"
+)
+
+// renderSvg renders an SVG shape by loading cached tessellation
+// and emitting RenderSvg commands.
+func renderSvg(shape *Shape, clip drawClip, w *Window) {
+	if !rectsOverlap(shapeBounds(shape), clip) {
+		return
+	}
+
+	var cached *CachedSvg
+	var err error
+	if shape.svgOpts != nil {
+		cached, err = w.LoadSvgWithOpts(shape.Resource,
+			shape.Width, shape.Height, *shape.svgOpts)
+	} else {
+		cached, err = w.LoadSvg(shape.Resource,
+			shape.Width, shape.Height)
+	}
+	if err != nil {
+		log.Printf("renderSvg: %v", err)
+		emitErrorPlaceholder(shape.X, shape.Y,
+			shape.Width, shape.Height, w)
+		return
+	}
+
+	color := shape.Color
+	if shape.Disabled {
+		color = dimAlpha(color)
+	}
+
+	// Position SVG content per preserveAspectRatio. Align splits
+	// the slack (or, under slice, the overflow) along each axis;
+	// default xMidYMid centers — historic behavior.
+	// SvgAlignNone non-uniformly stretches to fill: scaleX/scaleY
+	// are independent, slack is zero, no alignment offset.
+	var scaleX, scaleY, sx, sy float32
+	if cached.PreserveAlign == SvgAlignNone {
+		// Guard against zero, negative, NaN, and Inf viewBox
+		// dimensions from a malicious or malformed SVG. Fall
+		// back to the uniform tessellation scale so detail
+		// level matches and the render stays stable.
+		if cached.Width > 0 && cached.Height > 0 &&
+			f32IsFinite(cached.Width) && f32IsFinite(cached.Height) {
+			scaleX = shape.Width / cached.Width
+			scaleY = shape.Height / cached.Height
+		} else {
+			scaleX = cached.Scale
+			scaleY = cached.Scale
+		}
+		sx = shape.X - cached.ViewBoxX*scaleX
+		sy = shape.Y - cached.ViewBoxY*scaleY
+	} else {
+		slackX := shape.Width - cached.Width*cached.Scale
+		slackY := shape.Height - cached.Height*cached.Scale
+		xFrac, yFrac := PreserveAlignFractions(cached.PreserveAlign)
+		clipX := shape.X + slackX*xFrac
+		clipY := shape.Y + slackY*yFrac
+		sx = clipX - cached.ViewBoxX*cached.Scale
+		sy = clipY - cached.ViewBoxY*cached.Scale
+	}
+
+	// Clip to intersection of parent clip and the shape rect. Under
+	// preserveAspectRatio=slice the scaled content is larger than the
+	// shape; the shape rect bounds the visible region. Under meet the
+	// shape is the bounding box and content fits within it.
+	svgClip, ok := rectIntersection(clip, drawClip{
+		X:      shape.X,
+		Y:      shape.Y,
+		Width:  shape.Width,
+		Height: shape.Height,
+	})
+	if !ok {
+		return
+	}
+	emitClipCmd(svgClip, w)
+
+	// Compute animation state for SMIL animations.
+	var animState map[uint32]svgAnimState
+	if cached.hasAnimations && cached.animStartNs != 0 {
+		animState = w.scratch.svgAnimStates.take(len(cached.Animations))
+		defer w.scratch.svgAnimStates.put(animState)
+		nowNs := time.Now().UnixNano()
+		// Keep animation alive while SVG is being rendered.
+		if cached.animHash != "" {
+			animSeen := StateMap[string, int64](
+				w, nsSvgAnimSeen, capImageCache)
+			animSeen.Set(cached.animHash, nowNs)
+		}
+		elapsed := float32(nowNs-cached.animStartNs) /
+			float32(time.Second)
+		contribScratch := w.scratch.svgAnimContribs.take(
+			len(cached.Animations))
+		animState = computeSvgAnimationsReuse(
+			cached.Animations, elapsed, animState, contribScratch,
+			cached.baseByPath)
+		w.scratch.svgAnimContribs.put(contribScratch)
+	}
+
+	// animByPID lets emitSvgGroup look up override geometry per
+	// PathID, so the same map serves main and filtered-group passes.
+	var animTris []TessellatedPath
+	var animByPID map[uint32][]float32
+	if cached.hasAttrAnim && cached.hasAnimatedPaths {
+		overrides := extractAttrOverrides(w, animState)
+		if len(overrides) > 0 {
+			if ap, ok := w.svgParser.(AnimatedSvgParser); ok {
+				reuse := w.scratch.svgAnimTriangles.take(0)
+				animTris = ap.TessellateAnimated(
+					cached.Parsed, cached.Scale, overrides, reuse)
+				defer w.scratch.svgAnimTriangles.put(animTris)
+				if len(animTris) > 0 {
+					animByPID = w.scratch.svgAnimByPID.take(len(animTris))
+					defer w.scratch.svgAnimByPID.put(animByPID)
+					for i := range animTris {
+						animByPID[animTris[i].PathID] = animTris[i].Triangles
+					}
+				}
+			}
+			w.scratch.svgAnimOverrides.put(overrides)
+		}
+	}
+
+	// Emit main paths, text, and textPath elements.
+	nonUniform := validNonUniform(scaleX, scaleY, cached.Scale)
+	emitSvgGroup(cached.renderPaths, animByPID, cached.textDraws,
+		cached.textPathDraws, color, sx, sy,
+		cached.Scale, scaleX, scaleY, nonUniform, animState, shape, w)
+
+	// Emit filtered groups.
+	for i, fg := range cached.FilteredGroups {
+		// Scale the filter bbox and blur; non-uniform stretch
+		// uses independent scaleX/scaleY.
+		fw := fg.bBox[2] * cached.Scale
+		fh := fg.bBox[3] * cached.Scale
+		blur := fg.Filter.StdDev * cached.Scale
+		if nonUniform {
+			fw = fg.bBox[2] * scaleX
+			fh = fg.bBox[3] * scaleY
+			blur = fg.Filter.StdDev * max(scaleX, scaleY)
+		}
+		emitRenderer(RenderCmd{
+			Kind:       RenderFilterBegin,
+			groupIdx:   i,
+			X:          sx,
+			Y:          sy,
+			W:          fw,
+			H:          fh,
+			Scale:      cached.Scale,
+			BlurRadius: blur,
+			// Clamped: past a handful of layers the glow is
+			// saturated and each extra pass is a full-layer
+			// blend in every backend. An untrusted document
+			// names an arbitrary feMergeNode count.
+			Layers: min(fg.Filter.BlurLayers, maxFilterCompositeLayers),
+		}, w)
+		emitSvgGroup(fg.renderPaths, animByPID, fg.textDraws,
+			fg.textPathDraws, color, sx, sy,
+			cached.Scale, scaleX, scaleY, nonUniform, animState, shape, w)
+		emitRenderer(RenderCmd{
+			Kind: RenderFilterEnd,
+		}, w)
+
+		// KeepSource: re-draw sharp original on top of blur.
+		if fg.Filter.KeepSource {
+			emitSvgGroup(fg.renderPaths, animByPID, fg.textDraws,
+				fg.textPathDraws, color, sx, sy,
+				cached.Scale, scaleX, scaleY, nonUniform, animState, shape, w)
+		}
+	}
+
+	// Restore parent clip.
+	emitClipCmd(clip, w)
+}
+
+// PreserveAlignFractions returns the (x, y) slack fraction for an
+// SvgAlign value. xMin / yMin → 0 (origin), xMid / yMid → 0.5
+// (center), xMax / yMax → 1 (right/bottom). SvgAlignNone falls back
+// to xMidYMid pending non-uniform stretch support.
+func PreserveAlignFractions(a SvgAlign) (float32, float32) {
+	switch a {
+	case SvgAlignXMinYMin:
+		return 0, 0
+	case SvgAlignXMidYMin:
+		return 0.5, 0
+	case SvgAlignXMaxYMin:
+		return 1, 0
+	case SvgAlignXMinYMid:
+		return 0, 0.5
+	case SvgAlignXMaxYMid:
+		return 1, 0.5
+	case SvgAlignXMinYMax:
+		return 0, 1
+	case SvgAlignXMidYMax:
+		return 0.5, 1
+	case SvgAlignXMaxYMax:
+		return 1, 1
+	case SvgAlignNone:
+		// Non-uniform stretch — slack is zero, fraction irrelevant.
+		return 0, 0
+	default:
+		return 0.5, 0.5
+	}
+}
+
+// validNonUniform returns true when the caller-supplied non-uniform
+// scales are safe (positive, finite) and differ from the uniform
+// tessellation scale. NaN, Inf, zero, and negative values are
+// rejected so they cannot propagate into backend xform commands.
+func validNonUniform(sx, sy, uniform float32) bool {
+	return sx > 0 && sy > 0 &&
+		f32IsFinite(sx) && f32IsFinite(sy) &&
+		(sx != uniform || sy != uniform)
+}
+
+// emitSvgGroup emits paths, text draws, and text path draws.
+// animByPID, when non-nil, carries fresh triangles for animated
+// primitive shapes keyed by PathID. Animated paths look up their
+// override geometry; absent entries fall back to cached triangles.
+func emitSvgGroup(
+	paths []cachedSvgPath,
+	animByPID map[uint32][]float32,
+	textDraws []cachedSvgTextDraw,
+	textPathDraws []cachedSvgTextPathDraw,
+	color Color, sx, sy, scale, scaleX, scaleY float32,
+	nonUniform bool,
+	animState map[uint32]svgAnimState, shape *Shape, w *Window,
+) {
+	for i := range paths {
+		p := paths[i]
+		if p.Animated && p.PathID != 0 {
+			if tris, ok := animByPID[p.PathID]; ok {
+				p.Triangles = tris
+			}
+		}
+		emitSvgPathRenderer(p, color, sx, sy, scale, scaleX, scaleY, nonUniform, animState, shape, w)
+	}
+	for i := range textDraws {
+		emitCachedSvgTextDraw(&textDraws[i], sx, sy, shape, w)
+	}
+	for i := range textPathDraws {
+		emitCachedSvgTextPathDraw(&textPathDraws[i], sx, sy, shape, w)
+	}
+}
+
+// emitSvgPathRenderer emits a single SVG path as a RenderSvg
+// command. If tint has alpha>0 and path has no vertex colors,
+// the tint overrides the path color; the path's own alpha is
+// modulated in so per-element opacity (baked into path.Color.A
+// during parsing) survives the override. animState applies SMIL
+// rotation/opacity per GroupID.
+func emitSvgPathRenderer(path cachedSvgPath, tint Color,
+	x, y, scale, nsScaleX, nsScaleY float32,
+	nonUniform bool,
+	animState map[uint32]svgAnimState, shape *Shape, w *Window) {
+	hasVCols := len(path.VertexColors) > 0
+	c := path.Color
+	if tint.A > 0 && !hasVCols {
+		c = tint
+		c.A = blendAlpha(tint.A, path.Color.A)
+	}
+	var vcols []Color
+	if hasVCols {
+		if tint.A == 0 {
+			vcols = path.VertexColors
+		} else {
+			// Tint active on a gradient path: replace each vertex
+			// RGB with tint RGB while modulating its alpha so the
+			// gradient's alpha shape (e.g. fade-in tail of tail-
+			// spin) survives. vcols is allocated from a frame-
+			// scoped arena so repeated renders of tinted gradients
+			// avoid a per-frame heap allocation.
+			vcols = w.scratch.takeVColors(len(path.VertexColors))
+			for i, vc := range path.VertexColors {
+				t := tint
+				t.A = blendAlpha(tint.A, vc.A)
+				vcols[i] = t
+			}
+			c = tint
+		}
+	}
+
+	// A transparent tint means the shape named no color, so the
+	// paths above kept their own — and with them, full alpha. A
+	// faded or disabled widget would then paint at full strength
+	// while its tinted sibling dims. Scale alpha only, preserving
+	// RGB: the tint branch above already carried opacity and dim
+	// for the tinted case, and the SMIL section below composes
+	// multiplicatively on top.
+	if tint.A == 0 {
+		c = dimColor(c, shape.Opacity, shape.Disabled)
+		vcols = dimmedVColors(vcols, shape.Opacity, shape.Disabled, w)
+	}
+
+	var rotAngle, rotCX, rotCY float32
+	var transX, transY, scaleX, scaleY float32
+	hasXform := nonUniform
+	if nonUniform {
+		scaleX = nsScaleX
+		scaleY = nsScaleY
+	}
+	var vAlphaScale float32
+	hasVAlpha := false
+	var animApplied bool
+	if animState != nil && path.PathID != 0 {
+		if st, ok := animState[path.PathID]; ok {
+			animApplied = true
+			rotAngle = st.RotAngle
+			rotCX = st.RotCX
+			rotCY = st.RotCY
+			if !hasVCols {
+				switch {
+				case path.IsStroke && st.HasStrokeColor:
+					nc := svgToColor(st.StrokeColor)
+					nc.A = blendAlpha(c.A, nc.A)
+					c = nc
+				case !path.IsStroke && st.HasFillColor:
+					nc := svgToColor(st.FillColor)
+					nc.A = blendAlpha(c.A, nc.A)
+					c = nc
+				}
+			}
+			if st.HasXform {
+				transX = st.TransX
+				transY = st.TransY
+				if nonUniform {
+					scaleX *= st.ScaleX
+					scaleY *= st.ScaleY
+				} else {
+					scaleX = st.ScaleX
+					scaleY = st.ScaleY
+				}
+				hasXform = true
+			}
+			opa := st.Opacity
+			if path.IsStroke {
+				opa *= st.StrokeOpacity
+			} else {
+				opa *= st.FillOpacity
+			}
+			// Clamp to [0,1] so hostile or out-of-range animation
+			// values cannot drive a negative or oversized alpha
+			// through the uint8 cast (undefined conversion).
+			opa = clampUnit(opa)
+			if opa < 1 {
+				c.A = uint8(float32(c.A) * opa)
+				if len(vcols) > 0 {
+					vAlphaScale = opa
+					hasVAlpha = true
+				}
+			}
+		}
+	}
+	if !animApplied && path.HasBaseXform {
+		transX = path.BaseTransX
+		transY = path.BaseTransY
+		if nonUniform && hasXform {
+			scaleX *= path.BaseScaleX
+			scaleY *= path.BaseScaleY
+		} else {
+			scaleX = path.BaseScaleX
+			scaleY = path.BaseScaleY
+		}
+		rotAngle = path.BaseRotAngle
+		hasXform = true
+		// seedFromTransform absorbs the translate column into a
+		// rotation pivot when rotation is present, so the decomposed
+		// base replays as R_(rcx,rcy)(v*scale + (0,0)). Fall back to
+		// pivot==offset for pure-translate bases where rcx/rcy are
+		// zero but BaseTransX/Y carry the translation.
+		rotCX = path.BaseRotCX
+		rotCY = path.BaseRotCY
+		if rotCX == 0 && rotCY == 0 {
+			rotCX = transX
+			rotCY = transY
+		}
+	}
+
+	// Non-uniform stretch (SvgAlignNone): neutralise the uniform
+	// Scale so the backend applies only ScaleX/ScaleY from HasXform.
+	effScale := scale
+	if nonUniform {
+		effScale = 1
+	}
+
+	emitRenderer(RenderCmd{
+		Kind:             RenderSvg,
+		Triangles:        path.Triangles,
+		Color:            c,
+		VertexColors:     vcols,
+		VertexAlphaScale: vAlphaScale,
+		HasVertexAlpha:   hasVAlpha,
+		X:                x,
+		Y:                y,
+		Scale:            effScale,
+		IsClipMask:       path.IsClipMask,
+		ClipGroup:        path.ClipGroup,
+		RotAngle:         rotAngle,
+		RotCX:            rotCX,
+		RotCY:            rotCY,
+		TransX:           transX,
+		TransY:           transY,
+		ScaleX:           scaleX,
+		ScaleY:           scaleY,
+		HasXform:         hasXform,
+	}, w)
+}
+
+// emitCachedSvgTextDraw emits a cached SVG text draw as a
+// RenderText command. draw points into the parse cache, so its
+// style must never be dimmed in place: the dimmed path copies the
+// style into the frame's scratch pool, which keeps TextStylePtr
+// stable until the frame ends. The undimmed path stays zero-alloc —
+// TextStylePtr into the cache and the shared gradient.
+func emitCachedSvgTextDraw(draw *cachedSvgTextDraw,
+	shapeX, shapeY float32, shape *Shape, w *Window) {
+	style, gradient := dimmedSvgTextStyle(
+		&draw.TextStyle, draw.Gradient, shape, w)
+	emitRenderer(RenderCmd{
+		Kind:         RenderText,
+		Text:         draw.Text,
+		X:            shapeX + draw.X,
+		Y:            shapeY + draw.Y,
+		Color:        style.Color,
+		FontName:     style.Family,
+		FontSize:     style.Size,
+		TextWidth:    draw.TextWidth,
+		TextStylePtr: style,
+		TextGradient: gradient,
+	}, w)
+}
+
+func emitCachedSvgTextPathDraw(draw *cachedSvgTextPathDraw,
+	shapeX, shapeY float32, shape *Shape, w *Window) {
+	style, _ := dimmedSvgTextStyle(&draw.TextStyle, nil, shape, w)
+	emitRenderer(RenderCmd{
+		Kind:         RenderTextPath,
+		Text:         draw.Text,
+		X:            shapeX,
+		Y:            shapeY,
+		TextStylePtr: style,
+		textPath:     &draw.Path,
+	}, w)
+}
+
+// dimmedSvgTextStyle returns the style pointer and gradient to emit
+// for a cached SVG text draw. With no fade and no disabled dim it
+// hands back the cache's own pointers, which is the zero-alloc case
+// every opaque frame takes. Otherwise it copies the style into the
+// frame scratch pool — cached is the parse cache, shared across
+// frames, so dimming it in place would stack frame after frame.
+func dimmedSvgTextStyle(
+	cached *TextStyle, gradient *glyph.GradientConfig,
+	shape *Shape, w *Window,
+) (*TextStyle, *glyph.GradientConfig) {
+	if !shape.Disabled && !(shape.Opacity < 1.0) {
+		return cached, gradient
+	}
+	style := *cached
+	style.Color = dimColor(style.Color, shape.Opacity, shape.Disabled)
+	style.BgColor = dimColor(style.BgColor, shape.Opacity, shape.Disabled)
+	style.StrokeColor = dimColor(style.StrokeColor,
+		shape.Opacity, shape.Disabled)
+	return w.scratch.renderTextStyles.alloc(style),
+		dimmedTextGradient(gradient, shape.Opacity, shape.Disabled)
+}

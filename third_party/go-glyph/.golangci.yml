@@ -1,0 +1,83 @@
+# Go-Glyph lint configuration.
+# Run: golangci-lint run ./...
+#
+# On Linux CI the default FreeType+HarfBuzz backend path compiles
+# (*_ft.go); files tagged darwin / windows / wasm are excluded by
+# the build system.
+#
+# See https://golangci-lint.run for documentation.
+
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+
+  settings:
+    govet:
+      enable:
+        - asmdecl
+        - assign
+        - atomic
+        - bools
+        - copylocks
+        - deepequalerrors
+        - defers
+        - directive
+        - errorsas
+        - framepointer
+        - httpresponse
+        - ifaceassert
+        - loopclosure
+        - lostcancel
+        - nilfunc
+        - printf
+        - reflectvaluecompare
+        - shift
+        - sigchanyzer
+        - slog
+        - stdmethods
+        - stringintconv
+        - structtag
+        - testinggoroutine
+        - tests
+        - unmarshal
+        - unreachable
+        - unsafeptr
+
+    errcheck:
+      exclude-functions:
+        - (*os.File).Close
+
+    staticcheck:
+      checks:
+        - all
+
+  exclusions:
+    warn-unused: false
+    generated: lax
+    paths:
+      - examples/.*
+    rules:
+      - source: "defer .*Close"
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/go-gui-org/go-glyph
+
+  exclusions:
+    warn-unused: false
+    generated: lax
+    paths:
+      - examples/.*

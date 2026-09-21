@@ -1,0 +1,381 @@
+package gui
+
+// markdown_select.go implements cross-block text selection for the Markdown widget.
+// Selection state is keyed by MarkdownCfg.ID and spans all RTF blocks
+// (paragraphs, headings, list items, blockquotes). Non-RTF blocks (tables,
+// images, code, math, HR) are skipped; their content is not selectable.
+
+import (
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/go-gui-org/go-glyph"
+)
+
+// mdSelState is the cross-block selection state for one markdown widget.
+type mdSelState struct {
+	SelBeg        uint32
+	SelEnd        uint32
+	LastClickTime int64
+}
+
+// mdBlockInfo describes one selectable RTF block within a markdown widget,
+// populated each frame by markdownContainerAmendLayout.
+// Layout is a shallow copy (not a pointer) so the block list can be used safely
+// in drag callbacks that outlive the current frame's shape tree.
+type mdBlockInfo struct {
+	FlatText  string
+	Layout    glyph.Layout
+	H         float32
+	StartRune uint32
+	RuneLen   uint32
+	ShapeX    float32
+	ShapeY    float32
+}
+
+// mdBlockCtx carries the markdown widget ID and the current cumulative rune
+// offset so render functions can stamp each RTF block with its position within
+// the markdown's virtual flat text. ID is stamped on every block — it is the
+// document identity anchor-resolution keys on — while Start is meaningful only
+// when Sel is set, which gates the selection machinery.
+type mdBlockCtx struct {
+	ID    string
+	Start uint32
+	Sel   bool
+}
+
+// markdownBlockAmendSel is called from rtfMarkdownAmendLayout for each RTF
+// block that belongs to a markdown widget. It computes which portion of this
+// block is covered by the markdown selection and writes TextSelBeg/TextSelEnd.
+func markdownBlockAmendSel(l *Layout, w *Window) {
+	tc := l.Shape.TC
+	if tc == nil || tc.markdownID == "" {
+		return
+	}
+	mdID := tc.markdownID
+	st := StateReadOr(w, nsMdSel, mdID, mdSelState{})
+	beg, end := u32Sort(st.SelBeg, st.SelEnd)
+	blockStart := tc.markdownBlockStart
+	blockEnd := blockStart + tc.markdownRuneLen
+	if end <= blockStart || beg >= blockEnd {
+		tc.textSelBeg = 0
+		tc.textSelEnd = 0
+		return
+	}
+	localBeg := max(beg, blockStart) - blockStart
+	localEnd := min(end, blockEnd) - blockStart
+	tc.textSelBeg = localBeg
+	tc.textSelEnd = localEnd
+}
+
+// markdownContainerAmendLayout is the AmendLayout hook on the markdown Column.
+// It walks all RTF descendants belonging to this markdown widget, rebuilds the
+// block-position list in the StateMap, and triggers per-block selection update.
+func markdownContainerAmendLayout(ctx EventCtx) {
+	mdID := ctx.Layout.Shape.idKey()
+	if mdID == "" {
+		return
+	}
+
+	// Collect all RTF blocks in this markdown by walking descendants.
+	var blocks []mdBlockInfo
+	mdWalkBlocks(ctx.Layout, mdID, &blocks)
+
+	// Sort by Y position (should already be ordered, but make it robust).
+	sort.Slice(blocks, func(i, j int) bool {
+		return blocks[i].ShapeY < blocks[j].ShapeY
+	})
+
+	// Persist for drag callbacks.
+	bm := StateMap[string, []mdBlockInfo](ctx.Window, nsMdBlocks, capMany)
+	bm.Set(mdID, blocks)
+
+	// Reset the selection when the document content changed since the
+	// last frame: SelBeg/SelEnd are rune offsets into the *previous*
+	// source, so a stale range would highlight — and Ctrl+C would
+	// copy — the wrong runes of the new text. The signature covers
+	// the block layout and full flat text, so any content change
+	// (including same-length rewrites) is caught; a mere layout
+	// change (resize, font) leaves the selection alone.
+	sig := mdBlocksSignature(blocks)
+	sm := StateMap[string, uint64](ctx.Window, nsMdSelSig, capMany)
+	if prev, ok := sm.Get(mdID); ok && prev != sig {
+		imap := StateMap[string, mdSelState](ctx.Window, nsMdSel, capMany)
+		// Default mdSelState{}: a cleared selection. Amend runs
+		// children-first, so a changed document shows the old
+		// highlight for the one frame being arranged — cosmetic
+		// only, the render after this frame already paints nothing.
+		imap.Set(mdID, mdSelState{})
+	}
+	sm.Set(mdID, sig)
+}
+
+// mdBlocksSignature hashes the block list — per-block rune offsets,
+// rune counts and full flat text — to detect document content changes
+// between frames. FNV-1a over the (small) total text; the per-frame
+// glyph shaping the blocks undergo anyway is far more expensive. Field
+// separators match the sibling FNV helpers in view_rtf.go.
+func mdBlocksSignature(blocks []mdBlockInfo) uint64 {
+	h := Fnv64Offset
+	for _, b := range blocks {
+		h = fnvU64(h, uint64(b.StartRune))
+		h = Fnv64Byte(h, fnvUnitSep)
+		h = fnvU64(h, uint64(b.RuneLen))
+		h = Fnv64Byte(h, fnvUnitSep)
+		h = Fnv64Str(h, b.FlatText)
+		h = Fnv64Byte(h, fnvUnitSep)
+	}
+	return h
+}
+
+// mdWalkBlocks recursively walks the layout tree to collect RTF blocks
+// belonging to the given markdown widget.
+func mdWalkBlocks(l *Layout, mdID string, out *[]mdBlockInfo) {
+	if l.Shape != nil && l.Shape.TC != nil &&
+		l.Shape.TC.markdownID == mdID &&
+		l.Shape.hasRtfLayout() {
+		tc := l.Shape.TC
+		*out = append(*out, mdBlockInfo{
+			H:         l.Shape.Height,
+			StartRune: tc.markdownBlockStart,
+			RuneLen:   tc.markdownRuneLen,
+			Layout:    *tc.rTFLayout, // shallow copy — safe for Items slice from cache
+			FlatText:  tc.rTFFlatText,
+			ShapeX:    l.Shape.X,
+			ShapeY:    l.Shape.Y,
+		})
+	}
+	for i := range l.Children {
+		mdWalkBlocks(&l.Children[i], mdID, out)
+	}
+}
+
+// markdownBlockOnClick is the OnClick handler for RTF blocks inside a
+// markdown widget with cross-block selection enabled.
+func markdownBlockOnClick(ctx EventCtx) {
+	// A link click still collapses the selection under the pointer, the
+	// way a browser drops the old highlight — but it must not arm the
+	// drag below. See the linkHit guard before MouseLock.
+	linkHit := rtfClickLink(ctx)
+	if ctx.Event.MouseButton == MouseRight {
+		return
+	}
+
+	shape := ctx.Layout.Shape
+	if shape.TC == nil || !shape.hasRtfLayout() {
+		return
+	}
+	mdID := shape.TC.markdownID
+	if mdID == "" {
+		return
+	}
+	ctx.Window.SetFocus(mdID)
+
+	// Compute abs rune position within the markdown flat text. OnClick
+	// is dispatched through callRelative, which already translates the
+	// event to shape-local coordinates — the glyph layout's char rects
+	// are in that same space, so no further translation (and no scroll
+	// accounting) is needed here. The drag path differs: MouseLock
+	// callbacks receive window coordinates, which is why mdHitAbsRune
+	// subtracts the block's ShapeX/ShapeY.
+	gl := shape.TC.rTFLayout
+	flatText := shape.TC.rTFFlatText
+	byteIdx := gl.GetClosestOffset(ctx.Event.MouseX, ctx.Event.MouseY)
+	localRune := byteToRuneIndex(flatText, byteIdx)
+	absRune := uint32(localRune) + shape.TC.markdownBlockStart
+
+	imap := StateMap[string, mdSelState](ctx.Window, nsMdSel, capMany)
+	// Default mdSelState{}: zero value means no prior selection.
+	st := imap.GetOr(mdID, mdSelState{})
+
+	now := time.Now().UnixMilli()
+	doubleClick := st.LastClickTime > 0 &&
+		now-st.LastClickTime <= doubleClickThresholdMs
+	st.LastClickTime = now
+
+	if doubleClick {
+		bBeg, bEnd := gl.GetWordAtIndex(byteIdx)
+		wb := uint32(byteToRuneIndex(flatText, bBeg)) + shape.TC.markdownBlockStart
+		we := uint32(byteToRuneIndex(flatText, bEnd)) + shape.TC.markdownBlockStart
+		st.SelBeg = wb
+		st.SelEnd = we
+	} else {
+		st.SelBeg = absRune
+		st.SelEnd = absRune
+	}
+	imap.Set(mdID, st)
+	ctx.Consume()
+
+	// The click activated a link, so it is spent: navigation owns it.
+	// Arming the drag here would lock the mouse for a release that
+	// never reaches this widget — the link opened a browser, scrolled
+	// the view away, or raised a context menu over the pointer — and
+	// the pointer would then keep extending the selection with no
+	// button held.
+	if linkHit {
+		return
+	}
+
+	// Capture drag state. Copy layout value so it's safe across frames.
+	anchorBeg := st.SelBeg
+	anchorEnd := st.SelEnd
+	dragMdID := mdID
+	isDouble := doubleClick
+	dragGl := *gl
+	dragFlatText := flatText
+	dragBlockStart := shape.TC.markdownBlockStart
+
+	ctx.Window.MouseLock(MouseLockCfg{
+		MouseMove: func(ctx EventCtx) {
+			bm := StateMap[string, []mdBlockInfo](ctx.Window, nsMdBlocks, capMany)
+			// Default nil: absent entry means no block info
+			// recorded yet.
+			blocks := bm.GetOr(dragMdID, nil)
+			absPos := mdHitAbsRune(ctx.Event.MouseX, ctx.Event.MouseY,
+				blocks, dragGl, dragFlatText, dragBlockStart)
+
+			dim := StateMap[string, mdSelState](ctx.Window, nsMdSel, capMany)
+			// Default mdSelState{}: zero value means no prior
+			// selection during drag.
+			dst := dim.GetOr(dragMdID, mdSelState{})
+			if isDouble {
+				// Extend word-by-word.
+				if absPos < anchorBeg {
+					dst.SelBeg = anchorEnd
+					dst.SelEnd = absPos
+				} else {
+					dst.SelBeg = anchorBeg
+					dst.SelEnd = absPos
+				}
+			} else {
+				dst.SelBeg = anchorBeg
+				dst.SelEnd = absPos
+			}
+			dim.Set(dragMdID, dst)
+		},
+		MouseUp: func(ctx EventCtx) {
+			ctx.Window.MouseUnlock()
+		},
+	})
+}
+
+// mdHitAbsRune finds the absolute rune position (in the markdown flat text)
+// for a window-absolute mouse position by scanning the block list.
+func mdHitAbsRune(
+	mx, my float32,
+	blocks []mdBlockInfo,
+	fallbackGL glyph.Layout,
+	fallbackText string,
+	fallbackStart uint32,
+) uint32 {
+	if len(blocks) == 0 {
+		top, bot := glyphTextBand(&fallbackGL)
+		x := textDragEdgeX(mx, my, top, bot)
+		bi := fallbackGL.GetClosestOffset(x, my)
+		return fallbackStart + uint32(byteToRuneIndex(fallbackText, bi))
+	}
+	// Find the block the mouse is over, defaulting to the last block above.
+	best := &blocks[0]
+	for i := range blocks {
+		b := &blocks[i]
+		if my >= b.ShapeY && my < b.ShapeY+b.H {
+			best = b
+			break
+		}
+		if my >= b.ShapeY+b.H {
+			best = b
+		}
+	}
+	relY := my - best.ShapeY
+	// Above the first block or below the last one — and in the gap
+	// between two blocks, where the block above is chosen — the drag
+	// takes the whole line rather than stopping at the pointer's
+	// column; see textDragEdgeX.
+	top, bot := glyphTextBand(&best.Layout)
+	relX := textDragEdgeX(mx-best.ShapeX, relY, top, bot)
+	bi := best.Layout.GetClosestOffset(relX, relY)
+	localRune := uint32(byteToRuneIndex(best.FlatText, bi))
+	return best.StartRune + localRune
+}
+
+// markdownContainerOnKeyDown handles keyboard events for the markdown container.
+// Supports Ctrl+A (select all) and Ctrl+C (copy).
+func markdownContainerOnKeyDown(ctx EventCtx) {
+	mdID := ctx.Layout.Shape.idKey()
+	if mdID == "" || !ctx.Window.IsFocus(mdID) {
+		return
+	}
+	bm := StateMap[string, []mdBlockInfo](ctx.Window, nsMdBlocks, capMany)
+	// Default nil: absent entry means no blocks available.
+	blocks := bm.GetOr(mdID, nil)
+	if len(blocks) == 0 {
+		return
+	}
+
+	handled := true
+	switch ctx.Event.KeyCode {
+	case KeyA:
+		if ctx.Event.Modifiers.HasAny(ModCtrl, ModSuper) {
+			totalRunes := uint32(0)
+			for _, b := range blocks {
+				totalRunes += b.RuneLen
+			}
+			imap := StateMap[string, mdSelState](ctx.Window, nsMdSel, capMany)
+			// Default mdSelState{}: zero value means no prior
+			// selection for select-all.
+			st := imap.GetOr(mdID, mdSelState{})
+			st.SelBeg = 0
+			st.SelEnd = totalRunes
+			imap.Set(mdID, st)
+		} else {
+			handled = false
+		}
+	case KeyC:
+		if ctx.Event.Modifiers.HasAny(ModCtrl, ModSuper) {
+			imap := StateMap[string, mdSelState](ctx.Window, nsMdSel, capMany)
+			// Default mdSelState{}: zero value means no prior
+			// selection to copy.
+			st := imap.GetOr(mdID, mdSelState{})
+			if st.SelBeg != st.SelEnd {
+				beg, end := u32Sort(st.SelBeg, st.SelEnd)
+				ctx.Window.SetClipboard(mdExtractText(blocks, beg, end))
+			}
+		} else {
+			handled = false
+		}
+	default:
+		handled = false
+	}
+
+	if handled {
+		ctx.Consume()
+	}
+}
+
+// mdExtractText extracts the text covered by [beg, end) rune range from the
+// block list, joining blocks with newlines.
+func mdExtractText(blocks []mdBlockInfo, beg, end uint32) string {
+	var sb strings.Builder
+	first := true
+	for _, b := range blocks {
+		blockEnd := b.StartRune + b.RuneLen
+		if end <= b.StartRune || beg >= blockEnd {
+			continue
+		}
+		if !first {
+			sb.WriteByte('\n')
+		}
+		first = false
+		localBeg := int(max(beg, b.StartRune) - b.StartRune)
+		localEnd := int(min(end, blockEnd) - b.StartRune)
+		runeCount := utf8RuneCount(b.FlatText)
+		if localEnd > runeCount {
+			localEnd = runeCount
+		}
+		if localBeg < localEnd {
+			sb.WriteString(b.FlatText[runeToByteIndex(b.FlatText, localBeg):runeToByteIndex(b.FlatText, localEnd)])
+		}
+	}
+	return sb.String()
+}

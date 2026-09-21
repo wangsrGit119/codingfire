@@ -1,0 +1,299 @@
+package gui
+
+// ProgressBarStyle defines progress bar visual properties.
+// exportaudit:keep — reachable from an exported signature
+type ProgressBarStyle struct {
+	TextStyle      TextStyle
+	Padding        Padding
+	textPadding    Padding
+	Size           float32
+	SizeBorder     float32
+	Radius         float32
+	Color          Color
+	colorBar       Color
+	ColorBorder    Color
+	textBackground Color
+	TextShow       bool
+}
+
+// SliderStyle defines slider visual properties.
+// exportaudit:keep — reachable from an exported signature
+type SliderStyle struct {
+	Size             float32
+	ThumbSize        float32
+	Color            Color
+	colorClick       Color
+	colorThumb       Color
+	colorLeft        Color
+	ColorFocus       Color
+	ColorHover       Color
+	ColorBorder      Color
+	ColorBorderFocus Color
+	Padding          Padding
+	SizeBorder       float32
+	Radius           float32
+}
+
+// TabControlStyle defines tab control visual properties.
+// exportaudit:keep — reachable from an exported signature
+type TabControlStyle struct {
+	TextStyle           TextStyle
+	textStyleSelected   TextStyle
+	textStyleDisabled   TextStyle
+	Padding             Padding
+	PaddingHeader       Padding
+	paddingContent      Padding
+	paddingTab          Padding
+	SizeBorder          float32
+	sizeHeaderBorder    float32
+	sizeContentBorder   float32
+	sizeTabBorder       float32
+	Radius              float32
+	radiusHeader        float32
+	radiusContent       float32
+	radiusTab           float32
+	Spacing             float32
+	spacingHeader       float32
+	Color               Color
+	ColorBorder         Color
+	ColorHeader         Color
+	colorHeaderBorder   Color
+	colorContent        Color
+	colorContentBorder  Color
+	colorTab            Color
+	colorTabHover       Color
+	colorTabFocus       Color
+	colorTabClick       Color
+	colorTabSelected    Color
+	colorTabDisabled    Color
+	colorTabBorder      Color
+	colorTabBorderFocus Color
+}
+
+// BreadcrumbStyle defines breadcrumb visual properties.
+// exportaudit:keep — reachable from an exported signature
+type BreadcrumbStyle struct {
+	TextStyle          TextStyle
+	textStyleSelected  TextStyle
+	textStyleDisabled  TextStyle
+	textStyleSeparator TextStyle
+	Separator          string
+	Padding            Padding
+	paddingTrail       Padding
+	paddingCrumb       Padding
+	paddingContent     Padding
+	Radius             float32
+	radiusCrumb        float32
+	radiusContent      float32
+	Spacing            float32
+	spacingTrail       float32
+	SizeBorder         float32
+	sizeContentBorder  float32
+	Color              Color
+	ColorBorder        Color
+	colorTrail         Color
+	colorCrumb         Color
+	colorCrumbHover    Color
+	colorCrumbClick    Color
+	colorCrumbSelected Color
+	colorCrumbDisabled Color
+	colorContent       Color
+	colorContentBorder Color
+}
+
+// SplitterStyle defines splitter visual properties.
+// exportaudit:keep — reachable from an exported signature
+type SplitterStyle struct {
+	HandleSize        float32
+	dragStep          float32
+	dragStepLarge     float32
+	colorHandle       Color
+	colorHandleHover  Color
+	colorHandleActive Color
+	colorHandleBorder Color
+	colorGrip         Color
+	colorButton       Color
+	colorButtonHover  Color
+	colorButtonActive Color
+	colorButtonIcon   Color
+	SizeBorder        float32
+	Radius            float32
+	radiusBorder      float32
+}
+
+// TableStyle defines table visual properties.
+// exportaudit:keep — reachable from an exported signature
+type TableStyle struct {
+	TextStyle          TextStyle
+	TextStyleHead      TextStyle
+	cellPadding        Padding
+	columnWidthDefault float32
+	columnWidthMin     float32
+	SizeBorder         float32
+	ColorBorder        Color
+	ColorBorderFocus   Color
+	ColorSelect        Color
+	// ColorSelectSubtle is the tint behind a selected row: the wash,
+	// never the full accent slab — focus is the ring, not a second
+	// fill (visual-refresh §4.3).
+	ColorSelectSubtle Color
+	ColorHover        Color
+	alignHead         HorizontalAlign
+}
+
+// ComboboxStyle defines combobox visual properties.
+// exportaudit:keep — reachable from an exported signature
+type ComboboxStyle struct {
+	TextStyle        TextStyle
+	PlaceholderStyle TextStyle
+	// Shadow lifts the open dropdown off the content behind it.
+	Shadow            *BoxShadow
+	Padding           Padding
+	SizeBorder        float32
+	Radius            float32
+	MinWidth          float32
+	MaxWidth          float32
+	maxDropdownHeight float32
+	Color             Color
+	ColorHover        Color
+	ColorFocus        Color
+	ColorBorder       Color
+	ColorBorderFocus  Color
+	ColorHighlight    Color
+	// ColorHighlightSubtle is the tint behind the highlighted
+	// dropdown row: the wash, never the full accent slab — focus is
+	// the ring, not a second fill (visual-refresh §4.3).
+	ColorHighlightSubtle Color
+}
+
+// CommandPaletteStyle defines command palette visual properties.
+// exportaudit:keep — reachable from an exported signature
+type CommandPaletteStyle struct {
+	TextStyle   TextStyle
+	detailStyle TextStyle
+	// Shadow lifts the palette off the backdrop. Modal tier, not
+	// popover tier — it floats further than a menu.
+	Shadow         *BoxShadow
+	SizeBorder     float32
+	Radius         float32
+	Width          float32
+	MaxHeight      float32
+	Color          Color
+	ColorBorder    Color
+	ColorHighlight Color
+	// ColorHighlightSubtle is the tint behind the highlighted row:
+	// the wash, never the full accent slab (visual-refresh §4.3).
+	ColorHighlightSubtle Color
+	backdropColor        Color
+}
+
+// MenubarStyle defines menubar visual properties.
+// exportaudit:keep — reachable from an exported signature
+type MenubarStyle struct {
+	TextStyle         TextStyle
+	textStyleSubtitle TextStyle
+	// Shadow lifts an open menu surface — a popup menu or a submenu —
+	// off the content behind it. The menubar strip itself is flush
+	// with the window chrome and takes no elevation, so this is
+	// applied only where the menu actually floats.
+	Shadow           *BoxShadow
+	Padding          Padding
+	paddingMenuItem  Padding
+	paddingSubmenu   Padding
+	paddingSubtitle  Padding
+	widthSubmenuMin  float32
+	widthSubmenuMax  float32
+	SizeBorder       float32
+	Radius           float32
+	radiusBorder     float32
+	radiusSubmenu    float32
+	radiusMenuItem   float32
+	Spacing          float32
+	spacingSubmenu   float32
+	Color            Color
+	ColorHover       Color
+	ColorFocus       Color
+	ColorBorder      Color
+	ColorBorderFocus Color
+	ColorSelect      Color
+	// ColorTextOnSelect is the text color drawn over the selected
+	// menu item. Resolved by ThemeMaker; unset themes keep body text.
+	ColorTextOnSelect Color
+}
+
+// DatePickerStyle defines date picker visual properties.
+// exportaudit:keep — reachable from an exported signature
+type DatePickerStyle struct {
+	TextStyle        TextStyle
+	Shadow           *BoxShadow
+	Padding          Padding
+	cellSpacing      float32
+	SizeBorder       float32
+	Radius           float32
+	radiusBorder     float32
+	Color            Color
+	ColorHover       Color
+	ColorFocus       Color
+	colorClick       Color
+	ColorBorder      Color
+	ColorBorderFocus Color
+	ColorSelect      Color
+	// ColorTextOnSelect is the text color drawn over ColorSelect
+	// fills. Resolved by ThemeMaker; unset themes keep body text.
+	ColorTextOnSelect    Color
+	HideTodayIndicator   bool
+	MondayFirstDayOfWeek bool
+	ShowAdjacentMonths   bool
+	WeekdaysLen          DatePickerWeekdayLen
+}
+
+// ColorPickerStyle defines color picker visual properties.
+// exportaudit:keep — reachable from an exported signature
+type ColorPickerStyle struct {
+	TextStyle        TextStyle
+	SizeBorder       float32
+	Radius           float32
+	sVSize           float32
+	sliderHeight     float32
+	indicatorSize    float32
+	Color            Color
+	ColorBorder      Color
+	ColorBorderFocus Color
+}
+
+// SkeletonStyle defines skeleton loader visual properties.
+// exportaudit:keep — reachable from an exported signature
+type SkeletonStyle struct {
+	Color          Color
+	ColorHighlight Color
+	Radius         float32
+}
+
+// Widget style mirrors. See the note on the mirror block in styles.go:
+// ThemeMaker is the only source of these values — never add an
+// initializer here.
+var (
+	defaultProgressBarStyle ProgressBarStyle
+
+	defaultSliderStyle SliderStyle
+
+	defaultTabControlStyle TabControlStyle
+
+	defaultBreadcrumbStyle BreadcrumbStyle
+
+	defaultSplitterStyle SplitterStyle
+
+	defaultTableStyle TableStyle
+
+	defaultComboboxStyle ComboboxStyle
+
+	defaultCommandPaletteStyle CommandPaletteStyle
+
+	defaultDatePickerStyle DatePickerStyle
+
+	defaultColorPickerStyle ColorPickerStyle
+
+	defaultSkeletonStyle SkeletonStyle
+
+	defaultMenubarStyle MenubarStyle
+)

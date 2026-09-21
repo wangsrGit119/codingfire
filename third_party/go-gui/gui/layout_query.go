@@ -1,0 +1,269 @@
+package gui
+
+// FindShape walks the layout depth-first until predicate is satisfied.
+func (layout *Layout) findShape(predicate func(Layout) bool) (*Shape, bool) {
+	if l, ok := layout.findLayoutDepth(predicate, 0); ok {
+		return l.Shape, true
+	}
+	return nil, false
+}
+
+// FindLayout walks the layout depth-first until predicate is satisfied.
+// Like the other tree walks, it stops descending past maxEventDepth.
+func (layout *Layout) FindLayout(predicate func(Layout) bool) (*Layout, bool) {
+	return layout.findLayoutDepth(predicate, 0)
+}
+
+func (layout *Layout) findLayoutDepth(predicate func(Layout) bool, depth int) (*Layout, bool) {
+	if overMaxDepth(depth) {
+		return nil, false
+	}
+	for i := range layout.Children {
+		if l, ok := layout.Children[i].findLayoutDepth(predicate, depth+1); ok {
+			return l, true
+		}
+	}
+	if predicate(*layout) {
+		return layout, true
+	}
+	return nil, false
+}
+
+// FindLayoutByFocusID recursively searches for a layout with matching focus ID.
+//
+// effectiveID is an effective ID (see gui/id_resolve.go): the full path
+// a widget resolves to under its ID-bearing ancestors, which is what
+// the focus store holds.
+func findLayoutByFocusID(layout *Layout, effectiveID string) (*Layout, bool) {
+	return findLayoutByFocusIDDepth(layout, effectiveID, 0)
+}
+
+func findLayoutByFocusIDDepth(layout *Layout, effectiveID string, depth int) (*Layout, bool) {
+	if overMaxDepth(depth) {
+		return nil, false
+	}
+	// Shape is checked for nil the way every other tree walk in the
+	// package checks it. A generated tree always carries one, so the
+	// walk this guards is a hand-built Layout — which the package
+	// treats as a real case (DebugStampDrift reports one) and which
+	// reaches here on every scroll event through focusedScrollTarget.
+	//
+	// The match is canTakeFocus, the same predicate dispatch and tab
+	// order use: a disabled shape must not receive the focused
+	// scroll, and a parked focus ID must not count as "inside" for
+	// retainDialogFocus.
+	if s := layout.Shape; effectiveID != "" && s != nil &&
+		s.canTakeFocus() && s.idKey() == effectiveID {
+		return layout, true
+	}
+	for i := range layout.Children {
+		if ly, ok := findLayoutByFocusIDDepth(&layout.Children[i], effectiveID, depth+1); ok {
+			return ly, true
+		}
+	}
+	return nil, false
+}
+
+// FindLayoutByScrollID recursively searches for a Scrollable layout
+// with matching scroll ID. An empty ID never matches. effectiveID is
+// an effective ID, as in [FindLayoutByFocusID].
+func findLayoutByScrollID(layout *Layout, effectiveID string) (*Layout, bool) {
+	return findLayoutByScrollIDDepth(layout, effectiveID, 0)
+}
+
+func findLayoutByScrollIDDepth(layout *Layout, effectiveID string, depth int) (*Layout, bool) {
+	if overMaxDepth(depth) {
+		return nil, false
+	}
+	if s := layout.Shape; effectiveID != "" && s != nil &&
+		s.Scrollable && s.idKey() == effectiveID {
+		return layout, true
+	}
+	for i := range layout.Children {
+		if ly, ok := findLayoutByScrollIDDepth(&layout.Children[i], effectiveID, depth+1); ok {
+			return ly, true
+		}
+	}
+	return nil, false
+}
+
+// FindByID searches the layout tree for a layout with the given ID.
+// An empty effectiveID never matches — a widget without an ID cannot
+// be addressed — matching the effectiveID != "" guards in
+// FindLayoutByScrollID and FindLayoutByFocusID.
+//
+// effectiveID is the widget's effective ID: a leaf under an ID-bearing ancestor
+// is addressed by its full path ("settings:name"), not by the leaf its
+// Cfg was written with. See gui/id_resolve.go.
+// A nil Shape means the layout tree has not been built yet (no frame
+// has been laid out), so there is nothing to find. Guarding here rather
+// than in each caller matches findScrollLayout, which already treats a
+// nil root Shape as "not found".
+//
+// A miss is reported by the [DebugUnknownLookup] gate when the frame
+// stamped the same leaf under a scope, which is what spelling a leaf
+// here looks like from the outside. Library code that probes for a
+// widget which may legitimately be absent calls findByID instead; see
+// debug_lookup.go.
+func (layout *Layout) FindByID(effectiveID string) (*Layout, bool) {
+	res, ok := layout.findByID(effectiveID)
+	if !ok {
+		debugLookupMiss(layout, "FindByID", effectiveID)
+	}
+	return res, ok
+}
+
+// findByID is FindByID without the debug report: the lookup itself,
+// for callers whose miss is a legitimate answer rather than a
+// misspelling.
+func (layout *Layout) findByID(effectiveID string) (*Layout, bool) {
+	return layout.findByIDDepth(effectiveID, 0)
+}
+
+func (layout *Layout) findByIDDepth(effectiveID string, depth int) (*Layout, bool) {
+	if overMaxDepth(depth) {
+		return nil, false
+	}
+	if effectiveID == "" {
+		return nil, false
+	}
+	// A nil Shape carries no ID but still has children: a hand-built
+	// Layout reaches here the same way it reaches the focus and scroll
+	// ID walks, so match the self only when there is a shape and always
+	// search below.
+	if s := layout.Shape; s != nil && s.idKey() == effectiveID {
+		return layout, true
+	}
+	for i := range layout.Children {
+		if res, ok := layout.Children[i].findByIDDepth(effectiveID, depth+1); ok {
+			return res, true
+		}
+	}
+	return nil, false
+}
+
+type focusCandidate struct {
+	shape *Shape
+	id    string
+}
+
+func collectFocusCandidates(layout *Layout, candidates *[]focusCandidate, seen map[string]struct{}) {
+	collectFocusCandidatesDepth(layout, candidates, seen, 0)
+}
+
+func collectFocusCandidatesDepth(layout *Layout, candidates *[]focusCandidate, seen map[string]struct{}, depth int) {
+	if overMaxDepth(depth) {
+		return
+	}
+	s := layout.Shape
+	if s != nil && s.canTakeFocus() && !s.FocusSkip {
+		// Candidates carry the effective ID: it is what the focus store
+		// holds, so it is what focusFindNext/Previous compare against.
+		//
+		// A duplicate ID collapses to a single tab stop; the extra
+		// widget is skipped. Reported by the debug gate's duplicate-ID
+		// check (debug.go), which sees every ID, not only focusable ones.
+		key := s.idKey()
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			*candidates = append(*candidates, focusCandidate{
+				id:    key,
+				shape: s,
+			})
+		}
+	}
+	for i := range layout.Children {
+		collectFocusCandidatesDepth(&layout.Children[i], candidates, seen, depth+1)
+	}
+}
+
+// focusFindNext returns the candidate after the one whose id equals
+// focusID, in DFS (tab) order, wrapping to the first. When focusID
+// is not among the candidates, returns the first.
+func focusFindNext(candidates []focusCandidate, focusID string) (*Shape, bool) {
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	for i, c := range candidates {
+		if c.id == focusID {
+			return candidates[(i+1)%len(candidates)].shape, true
+		}
+	}
+	return candidates[0].shape, true
+}
+
+// focusFindPrevious returns the candidate before the one whose id
+// equals focusID, in DFS (tab) order, wrapping to the last. When
+// focusID is not among the candidates, returns the last.
+func focusFindPrevious(candidates []focusCandidate, focusID string) (*Shape, bool) {
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	for i, c := range candidates {
+		if c.id == focusID {
+			return candidates[(i-1+len(candidates))%len(candidates)].shape, true
+		}
+	}
+	return candidates[len(candidates)-1].shape, true
+}
+
+type focusFinder func([]focusCandidate, string) (*Shape, bool)
+
+func (layout *Layout) findFocusable(w *Window, find focusFinder) (*Shape, bool) {
+	var candidates []focusCandidate
+	var seen map[string]struct{}
+	var focusID string
+	if w != nil {
+		candidates = w.scratch.focusCandidates.take(0)
+		defer func() { w.scratch.focusCandidates.put(candidates) }()
+		// No size hint: the count is unknown until the walk below
+		// fills it. take sizes to at least 8 when empty.
+		seen = w.scratch.focusSeen.take(0)
+		defer func() { w.scratch.focusSeen.put(seen) }()
+		focusID = w.FocusID()
+	} else {
+		seen = make(map[string]struct{})
+	}
+	collectFocusCandidates(layout, &candidates, seen)
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	return find(candidates, focusID)
+}
+
+// NextFocusable returns the next focusable shape after the
+// current focus. Wraps to first if at end.
+func (layout *Layout) nextFocusable(w *Window) (*Shape, bool) {
+	return layout.findFocusable(w, focusFindNext)
+}
+
+// PreviousFocusable returns the previous focusable shape before
+// the current focus. Wraps to last if at beginning.
+func (layout *Layout) previousFocusable(w *Window) (*Shape, bool) {
+	return layout.findFocusable(w, focusFindPrevious)
+}
+
+// rectIntersection returns the intersection of two rectangles.
+// Returns (drawClip, false) if no intersection.
+func rectIntersection(a, b drawClip) (drawClip, bool) {
+	x1 := f32Max(a.X, b.X)
+	y1 := f32Max(a.Y, b.Y)
+	x2 := f32Min(a.X+a.Width, b.X+b.Width)
+	y2 := f32Min(a.Y+a.Height, b.Y+b.Height)
+
+	if x2 > x1 && y2 > y1 {
+		return drawClip{
+			X:      x1,
+			Y:      y1,
+			Width:  x2 - x1,
+			Height: y2 - y1,
+		}, true
+	}
+	return drawClip{}, false
+}
+
+// PointInRectangle returns true if point is within bounds of rectangle.
+func pointInRectangle(x, y float32, rect drawClip) bool {
+	return x >= rect.X && y >= rect.Y &&
+		x < (rect.X+rect.Width) && y < (rect.Y+rect.Height)
+}

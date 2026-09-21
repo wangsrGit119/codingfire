@@ -1,0 +1,156 @@
+name: Release
+
+# Two ways in:
+#   * push a tag like v1.0.0
+#   * Actions tab -> Release -> Run workflow, and type the version
+# Both end up building the same thing and publishing the same asset name, so a
+# release cut by hand and one cut by a tag are indistinguishable afterwards.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (must match internal/core/version.go)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve the version
+        id: v
+        shell: pwsh
+        run: |
+          $ref = $env:GITHUB_REF
+          if ($ref -like 'refs/tags/v*') {
+            $ver = $ref.Substring('refs/tags/v'.Length)
+          } else {
+            $ver = '${{ inputs.version }}'.Trim()
+            if ($ver.StartsWith('v')) { $ver = $ver.Substring(1) }
+          }
+          if ($ver -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must look like 1.0.0 (got '$ver')."
+          }
+          Write-Host "version: $ver"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      # Same guard as release.ps1: a Go binary carries no version resource, so the
+      # constant is read out of the source. Bump it before tagging, not after -
+      # otherwise the asset silently disagrees with the tag it is attached to.
+      - name: Assert internal/core/version.go declares this version
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.v.outputs.version }}'
+          $verFile = 'internal\core\version.go'
+          if (-not (Test-Path -LiteralPath $verFile)) {
+            # Without this, a wrong working directory shows up as a null reference
+            # inside [regex]::Match, which reads like a regex bug.
+            throw "Not found: $verFile (working directory: $(Get-Location))"
+          }
+          $m = [regex]::Match((Get-Content -LiteralPath $verFile -Raw), 'Version\s*=\s*"([^"]+)"')
+          if (-not $m.Success) { throw "Could not parse a Version constant out of $verFile." }
+          $declared = $m.Groups[1].Value
+          if ($declared -ne $ver) {
+            throw "internal/core/version.go declares '$declared' but this release is '$ver'. Bump the constant first."
+          }
+          Write-Host "source declares $declared"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $env:CGO_ENABLED = '0'
+          $env:GOOS        = 'windows'
+          $env:GOARCH      = 'amd64'
+          go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist\CodingFire.exe .
+          if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
+          Write-Host ("built {0:N0} bytes" -f (Get-Item dist\CodingFire.exe).Length)
+
+      # The step above proves the *source* declares the right version. This one
+      # proves the thing we are about to ship agrees. Without it a build that
+      # silently failed to replace an existing dist\CodingFire.exe would package
+      # the previous version's binary under the new tag.
+      - name: Verify the built binary reports this version
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.v.outputs.version }}'
+          $report = Join-Path $env:RUNNER_TEMP 'version-check.txt'
+          & 'dist\CodingFire.exe' --dump $report | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the built binary exited $LASTEXITCODE on --dump." }
+          if (-not (Test-Path -LiteralPath $report)) { throw 'the built binary wrote no report.' }
+          $head = (Get-Content -LiteralPath $report -TotalCount 1)
+          Write-Host "binary reports: $head"
+          if ($head -notmatch [regex]::Escape($ver)) {
+            throw "the built binary reports '$head', which does not contain '$ver'."
+          }
+
+      - name: Package
+        id: pkg
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $ver = '${{ steps.v.outputs.version }}'
+          $zip = "CodingFire-win-x64-v$ver.zip"
+          # One file in the zip, on purpose: "unpack and run" should be literally
+          # true, with nothing to keep alongside the binary.
+          Compress-Archive -LiteralPath @('dist\CodingFire.exe') -DestinationPath $zip -Force
+          Write-Host ("$zip  {0:N0} bytes" -f (Get-Item $zip).Length)
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = '${{ steps.v.outputs.version }}'
+          $tag = "v$ver"
+          $zip = '${{ steps.pkg.outputs.zip }}'
+
+          # Built as an array rather than a here-string: a here-string's closing
+          # '@ must sit at column 0, which a YAML block scalar will not give you.
+          $notes = @(
+            'CodingFire for Windows (Go) - one static exe, no installer, no runtime, no DLLs.',
+            '',
+            '* Windows 10 and later, x64',
+            '* 23 read-only local data sources, including WorkBuddy (CN) and WorkBuddy (INTL) counted separately',
+            '* Same `--dump` report format as the C# build, byte for byte',
+            '',
+            'The [C#/.NET build](https://github.com/wangsrGit119/codingfire-win) remains the choice for Windows 7 and 8; this one trades that range for a self-contained binary and no .NET dependency.'
+          ) -join "`n"
+
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $tag already exists - replacing the asset"
+            gh release upload $tag $zip --clobber
+          } else {
+            gh release create $tag $zip --title "CodingFire for Windows (Go) $tag" --notes $notes --target $env:GITHUB_SHA
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh failed (exit $LASTEXITCODE)." }
+          Write-Host "published $tag"

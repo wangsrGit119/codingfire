@@ -1,0 +1,850 @@
+//go:build windows && !js
+
+package gl
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"runtime"
+	"runtime/debug"
+	"sync"
+	"syscall"
+	"unsafe"
+
+	gogl "github.com/go-gui-org/go-gui/gui/backend/internal/glbind"
+	"github.com/go-gui-org/go-gui/gui/backend/internal/hicon"
+	"golang.org/x/sys/windows"
+
+	"github.com/go-gui-org/go-glyph"
+	"github.com/go-gui-org/go-gui/gui"
+	"github.com/go-gui-org/go-gui/gui/backend/soft"
+)
+
+// --- Win32 API bindings ---
+
+var (
+	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	user32   = windows.NewLazySystemDLL("user32.dll")
+
+	pGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+	pGlobalAlloc      = kernel32.NewProc("GlobalAlloc")
+	pGlobalLock       = kernel32.NewProc("GlobalLock")
+	pGlobalUnlock     = kernel32.NewProc("GlobalUnlock")
+	pRtlMoveMemory    = kernel32.NewProc("RtlMoveMemory")
+	pLstrlenW         = kernel32.NewProc("lstrlenW")
+
+	pRegisterClassExW = user32.NewProc("RegisterClassExW")
+	pCreateWindowExW  = user32.NewProc("CreateWindowExW")
+	pDestroyWindow    = user32.NewProc("DestroyWindow")
+	pDefWindowProcW   = user32.NewProc("DefWindowProcW")
+	pShowWindow       = user32.NewProc("ShowWindow")
+	pUpdateWindow     = user32.NewProc("UpdateWindow")
+	pPeekMessageW     = user32.NewProc("PeekMessageW")
+	pTranslateMessage = user32.NewProc("TranslateMessage")
+	pDispatchMessageW = user32.NewProc("DispatchMessageW")
+	pPostMessageW     = user32.NewProc("PostMessageW")
+	pGetDC            = user32.NewProc("GetDC")
+	pReleaseDC        = user32.NewProc("ReleaseDC")
+	pMsgWaitForMulti  = user32.NewProc("MsgWaitForMultipleObjectsEx")
+	pLoadCursorW      = user32.NewProc("LoadCursorW")
+	pSetCursor        = user32.NewProc("SetCursor")
+	pGetClientRect    = user32.NewProc("GetClientRect")
+	pSetWindowTextW   = user32.NewProc("SetWindowTextW")
+	pSetWindowPos     = user32.NewProc("SetWindowPos")
+	pScreenToClient   = user32.NewProc("ScreenToClient")
+	pSetCapture       = user32.NewProc("SetCapture")
+	pReleaseCapture   = user32.NewProc("ReleaseCapture")
+	pTrackMouseEvent  = user32.NewProc("TrackMouseEvent")
+	pValidateRect     = user32.NewProc("ValidateRect")
+	pGetDpiForWindow  = user32.NewProc("GetDpiForWindow")
+	pGetDpiForSystem  = user32.NewProc("GetDpiForSystem")
+	pSetDpiAware      = user32.NewProc("SetProcessDpiAwarenessContext")
+	pAdjustRectDpi    = user32.NewProc("AdjustWindowRectExForDpi")
+	pOpenClipboard    = user32.NewProc("OpenClipboard")
+	pCloseClipboard   = user32.NewProc("CloseClipboard")
+	pEmptyClipboard   = user32.NewProc("EmptyClipboard")
+	pGetClipboardData = user32.NewProc("GetClipboardData")
+	pSetClipboardData = user32.NewProc("SetClipboardData")
+	pSendMessageW     = user32.NewProc("SendMessageW")
+	pSysParamsInfoW   = user32.NewProc("SystemParametersInfoW")
+)
+
+const (
+	csVRedraw = 0x0001
+	csHRedraw = 0x0002
+	csOwnDC   = 0x0020
+
+	wsOverlappedWindow = 0x00CF0000
+	wsFixed            = 0x00CA0000 // caption|sysmenu|minimizebox
+	wsClipSiblings     = 0x04000000
+	wsClipChildren     = 0x02000000
+
+	swShow       = 5
+	pmRemove     = 0x0001
+	cwUseDefault = 0x80000000
+
+	wmSetIcon = 0x0080
+	iconBig   = 1 // ICON_BIG: alt-tab
+	iconSmall = 0 // ICON_SMALL: titlebar, taskbar
+
+	qsAllInput         = 0x04FF
+	mwmoInputAvailable = 0x0004
+
+	// waitInfinite is INFINITE for MsgWaitForMultipleObjectsEx: block
+	// until a message arrives. Real window messages and the wake
+	// message (PostMessage wmApp) end the wait; nothing periodic does
+	// (issue #405).
+	waitInfinite = 0xFFFFFFFF
+
+	gmemMoveable  = 0x0002
+	cfUnicodeText = 13
+
+	idcArrow    = 32512
+	idcIBeam    = 32513
+	idcCross    = 32515
+	idcSizeNWSE = 32642
+	idcSizeNESW = 32643
+	idcSizeWE   = 32644
+	idcSizeNS   = 32645
+	idcSizeAll  = 32646
+	idcNo       = 32648
+	idcHand     = 32649
+
+	// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4.
+	dpiPerMonitorV2 = ^uintptr(3)
+
+	// maxClipboardChars bounds a clipboard read. Any process can place
+	// arbitrarily large text on the clipboard; cap the allocation to
+	// avoid an out-of-memory DoS (32 MiB of UTF-16).
+	maxClipboardChars = 16 << 20
+)
+
+type wndClassExW struct {
+	cbSize        uint32
+	style         uint32
+	lpfnWndProc   uintptr
+	cbClsExtra    int32
+	cbWndExtra    int32
+	hInstance     uintptr
+	hIcon         uintptr
+	hCursor       uintptr
+	hbrBackground uintptr
+	lpszMenuName  *uint16
+	lpszClassName *uint16
+	hIconSm       uintptr
+}
+
+type pointW struct{ x, y int32 }
+
+// trackMouseEventW mirrors TRACKMOUSEEVENT.
+type trackMouseEventW struct {
+	cbSize      uint32
+	dwFlags     uint32
+	hwndTrack   uintptr
+	dwHoverTime uint32
+}
+
+// trackMouseLeave asks Windows for one WM_MOUSELEAVE when the pointer
+// leaves hwnd's client area. Reports whether the request was accepted.
+func trackMouseLeave(hwnd uintptr) bool {
+	tme := trackMouseEventW{dwFlags: tmeLeave, hwndTrack: hwnd}
+	tme.cbSize = uint32(unsafe.Sizeof(tme))
+	r, _, _ := pTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+	return r != 0
+}
+
+type rectW struct{ left, top, right, bottom int32 }
+
+type msgW struct {
+	hwnd     uintptr
+	message  uint32
+	wParam   uintptr
+	lParam   uintptr
+	time     uint32
+	pt       pointW
+	lPrivate uint32
+}
+
+// --- window registry (hwnd → Backend) ---
+
+var (
+	winMu  sync.Mutex
+	winReg = map[uintptr]*Backend{}
+
+	wndProcCallback = syscall.NewCallback(wndProc)
+	classOnce       sync.Once
+	className       = windows.StringToUTF16Ptr("GoGuiGLWindow")
+)
+
+func registerWindow(hwnd uintptr, b *Backend) {
+	winMu.Lock()
+	winReg[hwnd] = b
+	winMu.Unlock()
+}
+
+func unregisterWindow(hwnd uintptr) {
+	winMu.Lock()
+	delete(winReg, hwnd)
+	winMu.Unlock()
+}
+
+func lookupWindow(hwnd uintptr) *Backend {
+	winMu.Lock()
+	b := winReg[hwnd]
+	winMu.Unlock()
+	return b
+}
+
+// wndProc is the window procedure. It routes messages to the owning
+// Backend, falling back to DefWindowProc for unhandled messages and
+// for messages that arrive before the window is fully wired.
+func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
+	if b := lookupWindow(hwnd); b != nil && b.plat.w != nil {
+		if res, handled := b.handleMessage(msg, wparam, lparam); handled {
+			return res
+		}
+	}
+	r, _, _ := pDefWindowProcW.Call(hwnd, msg, wparam, lparam)
+	return r
+}
+
+// --- platformState (Win32 + WGL) ---
+
+type platformState struct {
+	hwnd  uintptr
+	hdc   uintptr
+	hglrc uintptr
+	hIcon uintptr
+	// frameless records DecorationNone: WM_NCCALCSIZE and
+	// WM_GETMINMAXINFO only deviate from the default for such a window.
+	frameless bool
+	// transparent records WindowCfg.Transparent, read by the opacity
+	// guard. Kept here rather than reached through w, which is nil
+	// until Run.
+	transparent bool
+	// minTrack and maxTrack are the outer-frame resize bounds in
+	// physical pixels, precomputed at create time so the
+	// WM_GETMINMAXINFO handler does no conversion per message. A zero
+	// component means that axis is unconstrained.
+	minTrack  pointL
+	maxTrack  pointL
+	cursors   [11]uintptr
+	curCursor uintptr
+	// cursorInClient is set by WM_SETCURSOR and cleared on leave.
+	// Frame updates must not replace the OS cursor over resize borders,
+	// the title bar, or another window.
+	cursorInClient bool
+	w              *gui.Window
+	evt            gui.Event // reused per message to avoid per-event allocation
+	highSurr       uint16    // pending UTF-16 high surrogate for WM_CHAR
+
+	// capturing tracks whether this window holds mouse capture, so
+	// WM_CAPTURECHANGED can tell our own ReleaseCapture from a
+	// revocation. See the wmCaptureChanged case in events_win32.go.
+	capturing bool
+	// trackingLeave is true while a TrackMouseEvent(TME_LEAVE) request
+	// is pending. WM_MOUSELEAVE consumes it.
+	trackingLeave bool
+
+	// IME state. The two buffers are reused across composition messages
+	// so a keystroke costs no allocation; imeRect caches the last caret
+	// rect reported to IMM, which the render path re-reports every frame.
+	imeBufW     []uint16
+	imeAttr     []byte
+	imeRect     rectW
+	imeHaveRect bool
+}
+
+func (p *platformState) wake() {
+	pPostMessageW.Call(p.hwnd, wmApp, 0, 0)
+}
+
+// pumpMessages drains all pending window messages, dispatching each
+// through wndProc (which delivers gui events synchronously).
+func pumpMessages(msg *msgW) {
+	for {
+		r, _, _ := pPeekMessageW.Call(
+			uintptr(unsafe.Pointer(msg)), 0, 0, 0, pmRemove)
+		if r == 0 {
+			return
+		}
+		pTranslateMessage.Call(uintptr(unsafe.Pointer(msg)))
+		pDispatchMessageW.Call(uintptr(unsafe.Pointer(msg)))
+	}
+}
+
+// waitMessage blocks until a message arrives or the timeout elapses.
+// waitInfinite blocks indefinitely; the wake message ends the wait.
+func waitMessage(ms uintptr) {
+	pMsgWaitForMulti.Call(0, 0, ms, qsAllInput, mwmoInputAvailable)
+}
+
+func (p *platformState) makeCurrent() { wglMakeCurrent(p.hdc, p.hglrc) }
+func (p *platformState) swap()        { swapBuffers(p.hdc) }
+
+func (p *platformState) drawableSize() (int32, int32) {
+	return clientSize(p.hwnd)
+}
+
+func (p *platformState) dpiScale() float32 {
+	return float32(dpiForWindow(p.hwnd)) / 96.0
+}
+
+func (p *platformState) setCursor(mc gui.MouseCursor) {
+	if int(mc) >= len(p.cursors) {
+		return
+	}
+	c := p.cursors[mc]
+	if c == 0 {
+		return
+	}
+	p.curCursor = c
+	if p.cursorInClient || p.capturing {
+		pSetCursor.Call(c)
+	}
+}
+
+func (p *platformState) destroy() {
+	if p.hglrc != 0 {
+		wglMakeCurrent(0, 0)
+		wglDeleteContext(p.hglrc)
+		p.hglrc = 0
+	}
+	if p.hdc != 0 && p.hwnd != 0 {
+		pReleaseDC.Call(p.hwnd, p.hdc)
+		p.hdc = 0
+	}
+	if p.hwnd != 0 {
+		unregisterWindow(p.hwnd)
+		pDestroyWindow.Call(p.hwnd)
+		p.hwnd = 0
+	}
+	if p.hIcon != 0 {
+		hicon.Destroy(p.hIcon)
+		p.hIcon = 0
+	}
+}
+
+// --- helpers ---
+
+func clientSize(hwnd uintptr) (int32, int32) {
+	var r rectW
+	pGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+	return r.right - r.left, r.bottom - r.top
+}
+
+// maxWindowIconDim caps the window icon size. 512x512 icons are
+// common (app artwork); anything beyond that is a mistake.
+const maxWindowIconDim = 1024
+
+// setWindowIcon installs cfg.IconPNG (or the go-gui default) as the
+// window's big and small icons via WM_SETICON. The HICON is owned by
+// p and released in destroy.
+func setWindowIcon(hwnd uintptr, cfg gui.WindowCfg, p *platformState) {
+	icon := cfg.IconPNG
+	if len(icon) == 0 {
+		icon = gui.DefaultIconPNG
+	}
+	h, err := hicon.FromPNG(icon, maxWindowIconDim)
+	if err != nil {
+		log.Printf("gl: window icon: %v", err)
+		return
+	}
+	pSendMessageW.Call(hwnd, wmSetIcon, iconBig, h)
+	pSendMessageW.Call(hwnd, wmSetIcon, iconSmall, h)
+	p.hIcon = h
+}
+
+func dpiForWindow(hwnd uintptr) uint32 {
+	r, _, _ := pGetDpiForWindow.Call(hwnd)
+	if r == 0 {
+		return 96
+	}
+	return uint32(r)
+}
+
+func dpiForSystem() uint32 {
+	r, _, _ := pGetDpiForSystem.Call()
+	if r == 0 {
+		return 96
+	}
+	return uint32(r)
+}
+
+func registerClass(hInstance uintptr) {
+	classOnce.Do(func() {
+		wc := wndClassExW{
+			style:         csHRedraw | csVRedraw | csOwnDC,
+			lpfnWndProc:   wndProcCallback,
+			hInstance:     hInstance,
+			lpszClassName: className,
+		}
+		hArrow, _, _ := pLoadCursorW.Call(0, idcArrow)
+		wc.hCursor = hArrow
+		wc.cbSize = uint32(unsafe.Sizeof(wc))
+		pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	})
+}
+
+func loadCursors(p *platformState) {
+	ld := func(id uintptr) uintptr {
+		h, _, _ := pLoadCursorW.Call(0, id)
+		return h
+	}
+	p.cursors[gui.CursorDefault] = ld(idcArrow)
+	p.cursors[gui.CursorArrow] = ld(idcArrow)
+	p.cursors[gui.CursorIBeam] = ld(idcIBeam)
+	p.cursors[gui.CursorCrosshair] = ld(idcCross)
+	p.cursors[gui.CursorPointingHand] = ld(idcHand)
+	p.cursors[gui.CursorResizeEW] = ld(idcSizeWE)
+	p.cursors[gui.CursorResizeNS] = ld(idcSizeNS)
+	p.cursors[gui.CursorResizeNWSE] = ld(idcSizeNWSE)
+	p.cursors[gui.CursorResizeNESW] = ld(idcSizeNESW)
+	p.cursors[gui.CursorResizeAll] = ld(idcSizeAll)
+	p.cursors[gui.CursorNotAllowed] = ld(idcNo)
+}
+
+func setClipboard(hwnd uintptr, s string) {
+	u := windows.StringToUTF16(s) // NUL-terminated
+	if r, _, _ := pOpenClipboard.Call(hwnd); r == 0 {
+		return
+	}
+	defer pCloseClipboard.Call()
+	pEmptyClipboard.Call()
+	n := uintptr(len(u) * 2)
+	h, _, _ := pGlobalAlloc.Call(gmemMoveable, n)
+	if h == 0 {
+		return
+	}
+	dst, _, _ := pGlobalLock.Call(h)
+	if dst == 0 {
+		return
+	}
+	// Copy via RtlMoveMemory to avoid a uintptr→unsafe.Pointer
+	// conversion on the locked handle (go vet unsafeptr).
+	pRtlMoveMemory.Call(dst, uintptr(unsafe.Pointer(&u[0])), n)
+	pGlobalUnlock.Call(h)
+	pSetClipboardData.Call(cfUnicodeText, h)
+}
+
+func getClipboard(hwnd uintptr) string {
+	if r, _, _ := pOpenClipboard.Call(hwnd); r == 0 {
+		return ""
+	}
+	defer pCloseClipboard.Call()
+	h, _, _ := pGetClipboardData.Call(cfUnicodeText)
+	if h == 0 {
+		return ""
+	}
+	src, _, _ := pGlobalLock.Call(h)
+	if src == 0 {
+		return ""
+	}
+	defer pGlobalUnlock.Call(h)
+	n, _, _ := pLstrlenW.Call(src) // uint16 count, excluding NUL
+	if n == 0 {
+		return ""
+	}
+	if n > maxClipboardChars {
+		n = maxClipboardChars // cap oversized clipboard content
+	}
+	buf := make([]uint16, n)
+	pRtlMoveMemory.Call(uintptr(unsafe.Pointer(&buf[0])), src, n*2)
+	return windows.UTF16ToString(buf)
+}
+
+// --- lifecycle ---
+
+// New creates an OpenGL 3.3 backend backed by a native Win32 window
+// and a WGL context.
+// exportaudit:keep — lowercase new shadows the Go builtin
+func New(w *gui.Window) (*Backend, error) {
+	runtime.LockOSThread()
+
+	pSetDpiAware.Call(dpiPerMonitorV2) // best-effort; ignore result
+	hInst, _, _ := pGetModuleHandleW.Call(0)
+	registerClass(hInst)
+
+	cfg := w.Config
+	title := cfg.Title
+	if title == "" {
+		title = "go-gui"
+	}
+	width := cfg.Width
+	if width <= 0 {
+		width = 640
+	}
+	height := cfg.Height
+	if height <= 0 {
+		height = 480
+	}
+
+	style := windowStyleFor(cfg)
+	windowClass := className
+	var exStyle uintptr
+	if cfg.BitmapFrame != nil || cfg.Software {
+		if cfg.BitmapFrame != nil && (!cfg.Transparent || cfg.Decorations != gui.DecorationNone) {
+			return nil, errors.New("bitmap windows require Transparent and DecorationNone")
+		}
+		windowClass = registerBitmapClass(hInst)
+		if cfg.Transparent {
+			exStyle = 0x00080000 | 0x08000000 | 0x00000080
+		} // layered, no-activate, tool window
+	}
+
+	// Size the window so its client area matches the requested
+	// logical size at the current system DPI.
+	dpi := dpiForSystem()
+	scale := float64(dpi) / 96.0
+	rc := rectW{0, 0, int32(float64(width) * scale), int32(float64(height) * scale)}
+	pAdjustRectDpi.Call(uintptr(unsafe.Pointer(&rc)), style, 0, 0, uintptr(dpi))
+	winW := rc.right - rc.left
+	winH := rc.bottom - rc.top
+
+	// Resize bounds share the style and DPI used for the initial size,
+	// so the floor means the same client area as Width/Height does.
+	limits := gui.WindowSizeLimits(cfg)
+	minTrack, maxTrack := trackSizeFor(limits, style, dpi)
+
+	hwnd, _, err := pCreateWindowExW.Call(
+		exStyle,
+		uintptr(unsafe.Pointer(windowClass)),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(title))),
+		style,
+		cwUseDefault, cwUseDefault,
+		uintptr(winW), uintptr(winH),
+		0, 0, hInst, 0,
+	)
+	if hwnd == 0 {
+		return nil, fmt.Errorf("gl: CreateWindowExW: %w", err)
+	}
+
+	b := &Backend{}
+	b.plat.hwnd = hwnd
+	b.plat.frameless = cfg.Decorations == gui.DecorationNone
+	b.plat.transparent = cfg.Transparent
+	b.plat.minTrack = minTrack
+	b.plat.maxTrack = maxTrack
+	registerWindow(hwnd, b)
+	if cfg.Transparent && cfg.BitmapFrame == nil && !cfg.Software {
+		// Before the pixel format is set: DWM must already be off the
+		// opaque composition path when the GL surface is bound to the
+		// window, or the first frames composite opaque.
+		enableWindowTransparency(w, hwnd)
+	}
+	// Replay a SetWindowOpacity made before the native platform was
+	// attached (in OnInit, or before backend.Run).
+	if o := w.WindowOpacity(); o < 1 {
+		applyWindowOpacity(w, hwnd, b.plat.transparent, o)
+	}
+	// Detach the IME until a text widget takes focus and IMEStart
+	// re-attaches it, matching the focus gating on macOS and X11. Without
+	// this a composition can begin with nothing to render the preedit.
+	imeAssociate(hwnd, 0)
+	setWindowIcon(hwnd, cfg, &b.plat)
+	if cfg.BitmapFrame != nil || cfg.Software {
+		b.dpiScale = float32(dpiForWindow(hwnd)) / 96
+		b.physW, b.physH = clientSize(hwnd)
+		w.BackingScale = b.dpiScale
+		raster := &bitmapSurface{hwnd: hwnd, opaque: !cfg.Transparent}
+		b.bitmapText = cfg.Software
+		if cfg.Software {
+			if err := soft.PrepareWindow(w, b.dpiScale); err != nil {
+				raster.close()
+				b.plat.destroy()
+				return nil, err
+			}
+		}
+		b.presentBitmap = func(w *gui.Window) {
+			w.BackingScale = b.dpiScale
+			if cfg.Software {
+				img, err := soft.RenderWindowFrame(w, b.dpiScale)
+				if err != nil {
+					log.Printf("software frame: %v", err)
+					return
+				}
+				raster.present(img)
+			} else {
+				raster.present(w.Config.BitmapFrame(w))
+			}
+		}
+		b.destroyBitmap = func() {
+			raster.close()
+			if cfg.Software {
+				soft.Release(w)
+			}
+		}
+		w.SetNativePlatform(&nativePlatform{b: b})
+		w.SetClipboardFn(func(text string) { setClipboard(hwnd, text) })
+		w.SetClipboardGetFn(func() string { return getClipboard(hwnd) })
+		w.SetTitleFn(func(t string) { pSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(t)))) })
+		loadCursors(&b.plat)
+		b.plat.curCursor = b.plat.cursors[gui.CursorDefault]
+		if !cfg.InitiallyHidden {
+			pShowWindow.Call(hwnd, 4) // SW_SHOWNOACTIVATE
+		}
+		return b, nil
+	}
+
+	hdc, _, _ := pGetDC.Call(hwnd)
+	if hdc == 0 {
+		b.plat.destroy()
+		return nil, errors.New("gl: GetDC failed")
+	}
+	b.plat.hdc = hdc
+
+	hglrc, err := createContext(hdc)
+	if err != nil {
+		b.plat.destroy()
+		return nil, fmt.Errorf("gl: createContext: %w", err)
+	}
+	b.plat.hglrc = hglrc
+
+	if err := gogl.InitWithProcAddrFunc(glProc); err != nil {
+		b.plat.destroy()
+		return nil, fmt.Errorf("gl: glbind init: %w", err)
+	}
+
+	b.dpiScale = float32(dpiForWindow(hwnd)) / 96.0
+	b.physW, b.physH = clientSize(hwnd)
+	b.initCaches(cfg)
+
+	if err := b.initGLResources(w); err != nil {
+		b.Destroy()
+		return nil, fmt.Errorf("gl: initGLResources: %w", err)
+	}
+
+	loadCursors(&b.plat)
+	b.plat.curCursor = b.plat.cursors[gui.CursorDefault]
+
+	w.SetClipboardFn(func(text string) { setClipboard(hwnd, text) })
+	w.SetClipboardGetFn(func() string { return getClipboard(hwnd) })
+	w.SetTitleFn(func(t string) {
+		pSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(t))))
+	})
+
+	if !cfg.InitiallyHidden {
+		pShowWindow.Call(hwnd, swShow)
+		pUpdateWindow.Call(hwnd)
+	}
+	return b, nil
+}
+
+// Destroy releases all backend resources.
+func (b *Backend) Destroy() {
+	if b.presentBitmap == nil && b.plat.hglrc != 0 {
+		b.plat.makeCurrent()
+	}
+	b.destroyGLResources()
+	b.plat.destroy()
+}
+
+// SetWindowOpacity fades the whole window. Refused on a Transparent
+// window, where the layered-window path and per-pixel alpha do not
+// compose; see layeredOpacityAllowed.
+func (n *nativePlatform) SetWindowOpacity(opacity float32) {
+	// Transparent comes from plat, not from plat.w.Config: plat.w is
+	// only filled once Run starts, and a nil there would read as "not
+	// Transparent" and let the guard through on the one window it
+	// exists to refuse.
+	applyWindowOpacity(n.b.plat.w, n.b.plat.hwnd,
+		n.b.plat.transparent, opacity)
+}
+
+// Run starts the event loop. Blocks until the window is closed.
+func (b *Backend) Run(w *gui.Window) {
+	defer w.WindowCleanup()
+	b.plat.w = w
+	if w.Config.OnInit != nil {
+		w.Config.OnInit(w)
+	}
+	w.SetWakeMainFn(b.plat.wake)
+
+	var msg msgW
+	for {
+		pumpMessages(&msg)
+		if w.CloseRequested() {
+			break
+		}
+		rendered := w.FrameFn()
+		if rendered {
+			b.renderFrame(w)
+		}
+		b.plat.setCursor(w.MouseCursorState())
+		if !rendered {
+			// CodingFire uses a time-driven pixel animation. The public
+			// InvalidateLayout API marks a frame dirty and calls wake(), but
+			// a transparent/click-through window can still have its posted
+			// wake message coalesced by the Win32 queue while the app is idle.
+			// A bounded wait keeps the backend responsive to the next 20Hz
+			// animation tick even when the mouse never moves over the window.
+			// It is intentionally finite only on the Windows GL loop; input
+			// handling and the normal wake path remain unchanged.
+			waitMessage(50)
+		}
+	}
+}
+
+// Run initializes the backend, runs the event loop, and cleans up on
+// exit. Panics on error; call RunE for the error-returning variant.
+func Run(w *gui.Window) {
+	if err := runE(w); err != nil {
+		panic(fmt.Sprintf("gl: %v", err))
+	}
+}
+
+// RunE initializes the backend, runs the event loop, and cleans up on
+// exit. Returns an error instead of panicking.
+func runE(w *gui.Window) error {
+	b, err := New(w)
+	if err != nil {
+		return fmt.Errorf("gl: %w", err)
+	}
+	defer b.Destroy()
+	b.Run(w)
+	return nil
+}
+
+// RunApp starts a multi-window event loop. Panics on error; call
+// RunAppE for the error-returning variant.
+func RunApp(app *gui.App, initialWindows ...*gui.Window) {
+	if err := runAppE(app, initialWindows...); err != nil {
+		panic(fmt.Sprintf("gl: %v", err))
+	}
+}
+
+// RunAppE starts a multi-window event loop. Each window is created and
+// registered with app. Blocks until the last window closes.
+//
+//nolint:gocyclo // backend event loop
+func runAppE(app *gui.App, initialWindows ...*gui.Window) error {
+	runtime.LockOSThread()
+
+	backends := make(map[uintptr]*Backend) // hwnd → backend
+	ids := make(map[uintptr]uint32)        // hwnd → app id
+	var nextID uint32
+
+	register := func(b *Backend, w *gui.Window) {
+		nextID++
+		ids[b.plat.hwnd] = nextID
+		backends[b.plat.hwnd] = b
+		app.Register(nextID, w)
+	}
+
+	open := func(w *gui.Window) error {
+		b, err := New(w)
+		if err != nil {
+			return err
+		}
+		b.plat.w = w
+		register(b, w)
+		w.SetWakeMainFn(b.plat.wake)
+		// App-level wake: OpenWindow from another goroutine must
+		// unblock the idle wait, which cannot observe the pending
+		// channel (issue #405).
+		app.SetWakeMainFn(b.plat.wake)
+		if w.Config.OnInit != nil {
+			w.Config.OnInit(w)
+		}
+		return nil
+	}
+
+	for _, w := range initialWindows {
+		if err := open(w); err != nil {
+			for _, b := range backends {
+				b.Destroy()
+			}
+			return fmt.Errorf("gl: create window: %w", err)
+		}
+	}
+
+	var msg msgW
+	for {
+		// Drain pending window opens.
+	drain:
+		for {
+			select {
+			case cfg := <-app.PendingOpen():
+				if err := open(gui.NewWindow(cfg)); err != nil {
+					log.Printf("gl: open window: %v", err)
+				}
+			default:
+				break drain
+			}
+		}
+
+		pumpMessages(&msg)
+
+		// Close windows whose close was requested.
+		for hwnd, b := range backends {
+			w := b.plat.w
+			if w == nil || !w.CloseRequested() {
+				continue
+			}
+			w.WindowCleanup()
+			b.Destroy()
+			delete(backends, hwnd)
+			if b.presentBitmap == nil || b.bitmapText {
+				// Native overlays need no fonts. Drop the process-wide face
+				// cache when the last text window closes instead of retaining it
+				// for the upstream five-minute idle timeout.
+				hasTextWindow := false
+				for _, remaining := range backends {
+					if remaining.presentBitmap == nil || remaining.bitmapText {
+						hasTextWindow = true
+						break
+					}
+				}
+				if !hasTextWindow {
+					glyph.ReleaseFontCache()
+					go func() {
+						// HarfBuzz fonts pass through sync.Pool's victim list;
+						// two collections release their table buffers as well.
+						debug.FreeOSMemory()
+						debug.FreeOSMemory()
+					}()
+				}
+			}
+			if app.Unregister(ids[hwnd]) {
+				return nil // last window closed
+			}
+			delete(ids, hwnd)
+		}
+		if len(backends) == 0 {
+			return nil
+		}
+
+		// The app-level wake posts to a specific hwnd, and a
+		// destroyed hwnd silently drops the message. Re-point it at
+		// a surviving window so OpenWindow still wakes the idle wait
+		// after a close (issue #405).
+		for _, b := range backends {
+			app.SetWakeMainFn(b.plat.wake)
+			break
+		}
+
+		// Frame + render each window.
+		rendered := false
+		for _, b := range backends {
+			w := b.plat.w
+			if w.FrameFn() {
+				b.renderFrame(w)
+				rendered = true
+			}
+			b.plat.setCursor(w.MouseCursorState())
+		}
+
+		if !rendered {
+			// CodingFire uses a time-driven pixel animation. The public
+			// InvalidateLayout API marks a frame dirty and calls wake(), but
+			// a transparent/click-through window can still have its posted
+			// wake message coalesced by the Win32 queue while the app is idle.
+			// A bounded wait keeps the backend responsive to the next 20Hz
+			// animation tick even when the mouse never moves over the window.
+			// It is intentionally finite only on the Windows GL loop; input
+			// handling and the normal wake path remain unchanged.
+			waitMessage(50)
+		}
+	}
+}

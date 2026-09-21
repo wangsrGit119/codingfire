@@ -1,0 +1,402 @@
+//go:build darwin && !ios
+
+// Package nativemenu provides native macOS menubar and system tray.
+package nativemenu
+
+/*
+#cgo CFLAGS: -fobjc-arc
+#cgo LDFLAGS: -framework AppKit
+#include "menu_darwin.h"
+#include <stdlib.h>
+*/
+import "C"
+
+import (
+	"sync"
+	"sync/atomic"
+	"unsafe"
+
+	"github.com/go-gui-org/go-gui/gui"
+)
+
+// Callback registries — set by Go, invoked from ObjC.
+var (
+	mu              sync.Mutex
+	menubarActionCb func(string)
+	trayActionCbs   = map[int]func(string){}
+)
+
+// keyEquivalent holds the virtual key code of the key-down that last fired a
+// menubar item through its key equivalent, plus one. Zero means none: the
+// offset keeps key code 0 (kVK_ANSI_A) distinct from "no key".
+//
+// Written by goNativeMenuAction during [NSApp sendEvent:] and read by the
+// metal backend's event mapper right after that sendEvent: returns. Both run
+// on the main thread; the atomic only keeps the race detector quiet and costs
+// nothing.
+var keyEquivalent atomic.Int32
+
+// TakeKeyEquivalent reports whether a menubar item fired from a key
+// equivalent since the last call, and the virtual key code of that key-down.
+// It clears the record, so each key-down is claimed at most once.
+//
+// The metal backend stores every key-down for Go before AppKit sees it, so a
+// key the menu consumed would otherwise also reach the window's command
+// registry. A backend calls this for each event it maps and drops a key-down
+// whose code matches.
+func TakeKeyEquivalent() (keyCode uint16, ok bool) {
+	v := keyEquivalent.Swap(0)
+	if v == 0 {
+		return 0, false
+	}
+	return uint16(v - 1), true
+}
+
+// noteKeyEquivalent records the key-down behind a menubar action. keyCode is
+// -1 (or any negative) when the action did not come from a key equivalent;
+// that clears any stale record rather than leaving it to eat a later key.
+func noteKeyEquivalent(keyCode int) {
+	if keyCode < 0 || keyCode > 0xFFFF {
+		keyEquivalent.Store(0)
+		return
+	}
+	keyEquivalent.Store(int32(keyCode) + 1)
+}
+
+//export goNativeMenuAction
+func goNativeMenuAction(cID *C.char, keyCode C.int) {
+	id := C.GoString(cID)
+	// Recorded before the callback runs, so the record exists even when the
+	// callback is nil — the menu still consumed the key.
+	noteKeyEquivalent(int(keyCode))
+	mu.Lock()
+	cb := menubarActionCb
+	mu.Unlock()
+	if cb != nil {
+		cb(id)
+	}
+}
+
+//export goNativeTrayAction
+func goNativeTrayAction(trayID C.int, cID *C.char) {
+	id := C.GoString(cID)
+	mu.Lock()
+	cb := trayActionCbs[int(trayID)]
+	mu.Unlock()
+	if cb != nil {
+		cb(id)
+	}
+}
+
+// flatten converts a tree of NativeMenuItemCfg into a flat
+// contiguous slice. Returns the per-menu descriptors and the
+// full flat array.
+func flatten(
+	menus []gui.NativeMenuCfg,
+) (menuDescs []C.NativeMenuItemC, allItems []C.NativeMenuItemC, cleanup func()) {
+	var freeList []*C.char
+
+	cstr := func(s string) *C.char {
+		if s == "" {
+			return nil
+		}
+		p := C.CString(s)
+		freeList = append(freeList, p)
+		return p
+	}
+
+	// First pass: count total items.
+	var totalItems int
+	for i := range menus {
+		totalItems += countItems(menus[i].Items)
+	}
+
+	allItems = make([]C.NativeMenuItemC, 0, totalItems)
+	menuDescs = make([]C.NativeMenuItemC, len(menus))
+
+	for i := range menus {
+		start := len(allItems)
+		flattenItems(menus[i].Items, &allItems, cstr)
+		topCount := len(menus[i].Items)
+		menuDescs[i] = C.NativeMenuItemC{
+			text:       cstr(menus[i].Title),
+			childStart: C.int(start),
+			childCount: C.int(topCount),
+		}
+	}
+
+	cleanup = func() {
+		for _, p := range freeList {
+			C.free(unsafe.Pointer(p))
+		}
+	}
+	return
+}
+
+func countItems(items []gui.NativeMenuItemCfg) int {
+	n := len(items)
+	for i := range items {
+		n += countItems(items[i].Submenu)
+	}
+	return n
+}
+
+func flattenItems(
+	items []gui.NativeMenuItemCfg,
+	out *[]C.NativeMenuItemC,
+	cstr func(string) *C.char,
+) {
+	baseIdx := len(*out)
+	// Reserve slots for this level.
+	for range items {
+		*out = append(*out, C.NativeMenuItemC{})
+	}
+
+	for i, item := range items {
+		ci := &(*out)[baseIdx+i]
+		ci.id = cstr(item.ID)
+		ci.text = cstr(item.Text)
+		if item.Separator {
+			ci.separator = 1
+		}
+		if item.Disabled {
+			ci.disabled = 1
+		}
+		if item.Checked {
+			ci.checked = 1
+		}
+		ci.shortcutChar, ci.shortcutMods = encodeShortcut(
+			item.Shortcut)
+
+		if len(item.Submenu) > 0 {
+			childStart := len(*out)
+			flattenItems(item.Submenu, out, cstr)
+			ci = &(*out)[baseIdx+i] // re-derive after append
+			ci.childStart = C.int(childStart)
+			ci.childCount = C.int(len(item.Submenu))
+		}
+	}
+}
+
+func encodeShortcut(s gui.Shortcut) (C.char, C.int) {
+	if !s.IsSet() {
+		return 0, 0
+	}
+	var ch byte
+	k := s.Key
+	switch {
+	case k >= gui.KeyA && k <= gui.KeyZ:
+		ch = byte('A' + (k - gui.KeyA))
+	case k >= gui.Key0 && k <= gui.Key9:
+		ch = byte('0' + (k - gui.Key0))
+	// Punctuation keys pass straight through: each is a valid AppKit key
+	// equivalent, and the ObjC side's lowercase fold is a no-op for them.
+	// Spelled out per key rather than by ASCII range — the KeyCode values
+	// only coincide with ASCII by convention (see event.go).
+	case k == gui.KeySpace:
+		ch = ' '
+	case k == gui.KeyApostrophe:
+		ch = '\''
+	case k == gui.KeyComma:
+		ch = ','
+	case k == gui.KeyMinus:
+		ch = '-'
+	case k == gui.KeyPeriod:
+		ch = '.'
+	case k == gui.KeySlash:
+		ch = '/'
+	case k == gui.KeySemicolon:
+		ch = ';'
+	case k == gui.KeyEqual:
+		ch = '='
+	case k == gui.KeyLeftBracket:
+		ch = '['
+	case k == gui.KeyBackslash:
+		ch = '\\'
+	case k == gui.KeyRightBracket:
+		ch = ']'
+	case k == gui.KeyGraveAccent:
+		ch = '`'
+	default:
+		return 0, 0
+	}
+	var mods int
+	if s.Modifiers.Has(gui.ModSuper) {
+		mods |= 1
+	}
+	if s.Modifiers.Has(gui.ModShift) {
+		mods |= 2
+	}
+	if s.Modifiers.Has(gui.ModAlt) {
+		mods |= 4
+	}
+	if s.Modifiers.Has(gui.ModCtrl) {
+		mods |= 8
+	}
+	return C.char(ch), C.int(mods)
+}
+
+// flattenTrayItems converts tray menu items into a flat C array.
+func flattenTrayItems(
+	items []gui.NativeMenuItemCfg,
+) (cItems []C.NativeMenuItemC, cleanup func()) {
+	var freeList []*C.char
+
+	cstr := func(s string) *C.char {
+		if s == "" {
+			return nil
+		}
+		p := C.CString(s)
+		freeList = append(freeList, p)
+		return p
+	}
+
+	cItems = make([]C.NativeMenuItemC, 0,
+		countItems(items))
+	flattenItems(items, &cItems, cstr)
+
+	cleanup = func() {
+		for _, p := range freeList {
+			C.free(unsafe.Pointer(p))
+		}
+	}
+	return
+}
+
+// SetMenubar installs a native macOS menubar.
+func SetMenubar(
+	cfg gui.NativeMenubarCfg, actionCb func(string),
+) {
+	mu.Lock()
+	menubarActionCb = actionCb
+	mu.Unlock()
+
+	menuDescs, allItems, cleanup := flatten(cfg.Menus)
+	defer cleanup()
+
+	cAppName := C.CString(cfg.AppName)
+	defer C.free(unsafe.Pointer(cAppName))
+
+	var cAboutID *C.char
+	if cfg.AboutActionID != "" {
+		cAboutID = C.CString(cfg.AboutActionID)
+		defer C.free(unsafe.Pointer(cAboutID))
+	}
+
+	var menusPtr *C.NativeMenuItemC
+	if len(menuDescs) > 0 {
+		menusPtr = &menuDescs[0]
+	}
+	var itemsPtr *C.NativeMenuItemC
+	if len(allItems) > 0 {
+		itemsPtr = &allItems[0]
+	}
+
+	inclEdit := C.int(0)
+	if cfg.IncludeEditMenu {
+		inclEdit = 1
+	}
+
+	suppSys := C.int(0)
+	if cfg.SuppressSystemEditItems {
+		suppSys = 1
+	}
+
+	omitAbout := C.int(0)
+	if cfg.OmitAboutItem {
+		omitAbout = 1
+	}
+
+	inclWindow := C.int(0)
+	if cfg.IncludeWindowMenu {
+		inclWindow = 1
+	}
+
+	C.nativemenuSetMenubar(cAppName,
+		menusPtr, C.int(len(menuDescs)),
+		itemsPtr, C.int(len(allItems)),
+		inclEdit, suppSys, cAboutID,
+		omitAbout, inclWindow)
+}
+
+// ClearMenubar removes the native menubar.
+func ClearMenubar() {
+	mu.Lock()
+	menubarActionCb = nil
+	mu.Unlock()
+	C.nativemenuClearMenubar()
+}
+
+// CreateSystemTray creates a tray icon with menu.
+func CreateSystemTray(
+	cfg gui.SystemTrayCfg, actionCb func(string),
+) (int, error) {
+	cItems, cleanup := flattenTrayItems(cfg.Menu)
+	defer cleanup()
+
+	var iconPtr unsafe.Pointer
+	iconLen := C.int(0)
+	if len(cfg.IconPNG) > 0 {
+		iconPtr = unsafe.Pointer(&cfg.IconPNG[0])
+		iconLen = C.int(len(cfg.IconPNG))
+	}
+
+	var cTooltip *C.char
+	if cfg.Tooltip != "" {
+		cTooltip = C.CString(cfg.Tooltip)
+		defer C.free(unsafe.Pointer(cTooltip))
+	}
+
+	var itemsPtr *C.NativeMenuItemC
+	if len(cItems) > 0 {
+		itemsPtr = &cItems[0]
+	}
+
+	trayID := int(C.nativemenuCreateTray(
+		iconPtr, iconLen,
+		cTooltip,
+		itemsPtr, C.int(len(cItems))))
+
+	mu.Lock()
+	trayActionCbs[trayID] = actionCb
+	mu.Unlock()
+
+	return trayID, nil
+}
+
+// UpdateSystemTray updates an existing tray entry.
+func UpdateSystemTray(id int, cfg gui.SystemTrayCfg) {
+	cItems, cleanup := flattenTrayItems(cfg.Menu)
+	defer cleanup()
+
+	var iconPtr unsafe.Pointer
+	iconLen := C.int(0)
+	if len(cfg.IconPNG) > 0 {
+		iconPtr = unsafe.Pointer(&cfg.IconPNG[0])
+		iconLen = C.int(len(cfg.IconPNG))
+	}
+
+	var cTooltip *C.char
+	if cfg.Tooltip != "" {
+		cTooltip = C.CString(cfg.Tooltip)
+		defer C.free(unsafe.Pointer(cTooltip))
+	}
+
+	var itemsPtr *C.NativeMenuItemC
+	if len(cItems) > 0 {
+		itemsPtr = &cItems[0]
+	}
+
+	C.nativemenuUpdateTray(C.int(id),
+		iconPtr, iconLen,
+		cTooltip,
+		itemsPtr, C.int(len(cItems)))
+}
+
+// RemoveSystemTray removes a tray icon.
+func RemoveSystemTray(id int) {
+	C.nativemenuRemoveTray(C.int(id))
+	mu.Lock()
+	delete(trayActionCbs, id)
+	mu.Unlock()
+}

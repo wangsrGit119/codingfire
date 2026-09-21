@@ -1,0 +1,270 @@
+package gui
+
+// StateRegistry stores per-widget BoundedMap instances keyed by
+// namespace string.
+//
+// Concurrency: StateMap reads and writes registry.maps without
+// holding w.mu. This is safe because all callers execute on the
+// main goroutine — during GenerateLayout (under w.mu), AmendLayout
+// (under w.mu), and OnValue animation callbacks (dispatched via
+// flushCommands on the main goroutine, before FrameFn acquires
+// w.mu). The animation loop goroutine only enqueues OnValue
+// callbacks; it never calls StateMap directly.
+type stateRegistry struct {
+	maps map[string]any
+}
+
+// StateMap returns (or lazily creates) a *BoundedMap[K, V] for the
+// given namespace.
+// SAFETY: main-goroutine only (see StateRegistry doc).
+func StateMap[K comparable, V any](w *Window, ns string, maxSize int) *BoundedMap[K, V] {
+	if ptr, ok := w.viewState.registry.maps[ns]; ok {
+		return ptr.(*BoundedMap[K, V])
+	}
+	m := NewBoundedMap[K, V](maxSize)
+	if w.viewState.registry.maps == nil {
+		w.viewState.registry.maps = make(map[string]any)
+	}
+	w.viewState.registry.maps[ns] = m
+	return m
+}
+
+// StateMapRead returns a *BoundedMap[K, V] for read-only access.
+// Returns nil if namespace not initialized.
+func StateMapRead[K comparable, V any](w *Window, ns string) *BoundedMap[K, V] {
+	if ptr, ok := w.viewState.registry.maps[ns]; ok {
+		return ptr.(*BoundedMap[K, V])
+	}
+	return nil
+}
+
+// StateReadOr returns the value for key in namespace, or defaultVal
+// if not found.
+func StateReadOr[K comparable, V any](w *Window, ns string, key K, defaultVal V) V {
+	sm := StateMapRead[K, V](w, ns)
+	if sm == nil {
+		return defaultVal
+	}
+	v, ok := sm.Get(key)
+	if !ok {
+		return defaultVal
+	}
+	return v
+}
+
+// Hot-namespace cached accessors. These bypass the StateRegistry's
+// map[string]any lookup + type assertion for namespaces that are
+// accessed per-shape in the layout pipeline. See §5 in
+// docs/specs/perf-optimizations.md.
+
+// lazyBoundedMap returns *pp, creating it via NewBoundedMap[K, V](cap)
+// if nil. Eliminates the repeated lazy-init boilerplate across
+// hot-namespace accessors.
+func lazyBoundedMap[K comparable, V any](pp **BoundedMap[K, V], cap int) *BoundedMap[K, V] {
+	if *pp == nil {
+		*pp = NewBoundedMap[K, V](cap)
+	}
+	return *pp
+}
+
+func (w *Window) hoverInside() *BoundedMap[string, uint64] {
+	return lazyBoundedMap(&w.hoverInsideMap, capModerate)
+}
+
+// ScrollX returns the horizontal scroll state map keyed by the
+// scrollable's ID. Used by external packages that need to read scroll
+// position for virtualization.
+func (w *Window) ScrollX() *BoundedMap[string, float32] {
+	return lazyBoundedMap(&w.scrollXMap, capScroll)
+}
+
+// ScrollY returns the vertical scroll state map keyed by the
+// scrollable's ID. Used by external packages that need to read scroll
+// position for virtualization.
+func (w *Window) ScrollY() *BoundedMap[string, float32] {
+	return lazyBoundedMap(&w.scrollYMap, capScroll)
+}
+
+func (w *Window) scrollX() *BoundedMap[string, float32] {
+	return w.ScrollX()
+}
+
+func (w *Window) scrollY() *BoundedMap[string, float32] {
+	return w.ScrollY()
+}
+
+func (w *Window) overflow() *BoundedMap[string, int] {
+	return lazyBoundedMap(&w.overflowMap, capModerate)
+}
+
+// scrollXRead returns the cached scroll-x map, or nil if it hasn't
+// been created yet. Matches StateMapRead semantics for cold paths
+// that must not lazily allocate.
+func (w *Window) scrollXRead() *BoundedMap[string, float32] {
+	return w.scrollXMap
+}
+
+// scrollYRead returns the cached scroll-y map, or nil if it hasn't
+// been created yet.
+func (w *Window) scrollYRead() *BoundedMap[string, float32] {
+	return w.scrollYMap
+}
+
+// clearHotMaps nils out the cached BoundedMap pointers so they are
+// recreated on next access. Call alongside registry.Clear().
+func (w *Window) clearHotMaps() {
+	w.idJoinCache = nil
+	w.hoverInsideMap = nil
+	w.scrollXMap = nil
+	w.scrollYMap = nil
+	w.overflowMap = nil
+	w.scrollSmoothReset()
+}
+
+// RequireID panics if id is empty. Use in stateful widget factories
+// whose internal state is keyed by cfg.ID in StateMap.
+func RequireID(widget, id string) {
+	if id == "" {
+		panic("gui: " + widget + " requires a non-empty Cfg.ID")
+	}
+}
+
+// requireFocusID panics when a widget that will join focus traversal
+// has no ID. It is the runtime half of the `gui:"required,focus"` tag
+// read by tools/requiredid, and honours the same opt-out: a control
+// marked FocusDisabled never reaches the tab order, so it has no
+// identity to name and is exempt.
+//
+// Widgets using the opposite convention (an opt-in Focusable field)
+// are not covered here; requiredid's checkFocusableID reports those
+// statically.
+func requireFocusID(widget string, focusDisabled bool, id string) {
+	if !focusDisabled {
+		RequireID(widget, id)
+	}
+}
+
+// RequireScrollID panics if a Scrollable widget has an empty ID.
+// Scroll identity and offset state are keyed by Cfg.ID, so a
+// scrollable widget must supply one.
+func requireScrollID(widget string, scrollable bool, id string) {
+	if scrollable && id == "" {
+		panic("gui: " + widget + " with Scrollable:true requires a non-empty Cfg.ID")
+	}
+}
+
+// requireOverflowID panics if an Overflow container has an empty ID.
+// layoutOverflow stores the visible-item count keyed by the ID, so
+// containers without one would share a single slot.
+func requireOverflowID(widget string, overflow bool, id string) {
+	if overflow && id == "" {
+		panic("gui: " + widget + " with Overflow:true requires a non-empty Cfg.ID")
+	}
+}
+
+// Clear drops all registry references.
+func (r *stateRegistry) Clear() {
+	clear(r.maps)
+}
+
+// ClearNamespace drops all entries in a single namespace.
+func (r *stateRegistry) clearNamespace(ns string) {
+	delete(r.maps, ns)
+}
+
+// entryCount returns the number of entries in the BoundedMap
+// for the given namespace, or 0 if not found.
+func (r *stateRegistry) entryCount(ns string) int {
+	type lenner interface{ Len() int }
+	if l, ok := r.maps[ns].(lenner); ok {
+		return l.Len()
+	}
+	return 0
+}
+
+// Namespace constants for internal gui state maps.
+const (
+	nsOverflow            = "gui.overflow"
+	nsScrollX             = "gui.scroll.x"
+	nsScrollY             = "gui.scroll.y"
+	nsSelect              = "gui.select"
+	nsInput               = "gui.input"
+	nsInputFocus          = "gui.input.focus"
+	nsSelectHL            = "gui.select.highlight"
+	nsListBoxFocus        = "gui.listbox.focus"
+	nsListBoxCache        = "gui.listbox.cache"
+	nsListHeights         = "gui.list.heights"
+	nsVirtualListFocus    = "gui.virtual_list.focus"
+	nsProgress            = "gui.progress"
+	nsSidebar             = "gui.sidebar"
+	nsCombobox            = "gui.combobox"
+	nsComboboxQuery       = "gui.combobox.query"
+	nsComboboxHighlight   = "gui.combobox.highlight"
+	nsComboboxItems       = "gui.combobox.items"
+	nsCmdPalette          = "gui.cmd_palette"
+	nsCmdPaletteQuery     = "gui.cmd_palette.query"
+	nsCmdPaletteHighlight = "gui.cmd_palette.highlight"
+	nsCmdPaletteItems     = "gui.cmd_palette.items"
+	nsTreeExpanded        = "gui.tree.expanded"
+	nsTreeFocus           = "gui.tree.focus"
+	nsTreeLazy            = "gui.tree.lazy"
+	nsInspector           = "gui.inspector"
+	nsInspectorWidth      = "gui.inspector.w"
+	nsDrawCanvas          = "gui.draw_canvas"
+	nsMenu                = "gui.menu"
+	nsDatePicker          = "gui.date_picker"
+	nsColorPicker         = "gui.color_picker"
+	nsSliderPress         = "gui.slider.press"
+	nsSplitterDrag        = "gui.splitter.drag"
+	nsInputDate           = "gui.input_date"
+	nsInputDateText       = "gui.input_date.text"
+	nsDgColWidths         = "gui.dg.col_widths"
+	nsDgPresentation      = "gui.dg.presentation"
+	nsDgResize            = "gui.dg.resize"
+	nsDgHeaderHover       = "gui.dg.header_hover"
+	nsDgRange             = "gui.dg.range"
+	nsDgChooserOpen       = "gui.dg.chooser_open"
+	nsDgEdit              = "gui.dg.edit"
+	nsDgCrud              = "gui.dg.crud"
+	nsDgJump              = "gui.dg.jump"
+	nsDgPendingJump       = "gui.dg.pending_jump"
+	nsDgSource            = "gui.dg.source"
+	nsActiveDownloads     = "gui.active_downloads"
+	nsImageResolved       = "gui.image.resolved"
+	nsImageWarned         = "gui.image.warned"
+	nsSvgCache            = "gui.svg_cache"
+	nsSvgDimCache         = "gui.svg_dim_cache"
+	nsSvgAnimSeen         = "gui.svg_anim_seen"
+	nsOpticalOffset       = "gui.optical_offset"
+	nsDragReorder         = "gui.drag_reorder"
+	nsDragReorderIDsMeta  = "gui.drag_reorder.ids_meta"
+	nsTableColWidths      = "gui.table.col_widths"
+	nsTableFocus          = "gui.table.focus"
+	nsTableAnchor         = "gui.table.anchor"
+	nsDockDrag            = "gui.dock_drag"
+	nsContextMenu         = "gui.context_menu"
+	nsContextMenuFocus    = "gui.context_menu.focus"
+	nsRtfLinkMenu         = "gui.rtf_link_menu"
+	nsForm                = "gui.form"
+	nsSpellCheck          = "gui.spell_check"
+	nsSkeleton            = "gui.skeleton"
+	nsTextAnim            = "gui.text_anim"
+	nsMathSpinner         = "gui.math_spinner"
+	nsHoverInside         = "gui.hover.inside"
+	nsMdSel               = "gui.markdown.sel"
+	nsMdBlocks            = "gui.markdown.blocks"
+	nsMdSelSig            = "gui.markdown.sel_sig"
+)
+
+// Capacity tiers.
+const (
+	capFew        = 20
+	capModerate   = 50
+	capMany       = 100
+	capScroll     = 200
+	capImageCache = 500
+	// capIDJoin bounds the ID-join memo. Sized well above the number of
+	// distinct identities a normal screen holds so the common frame is
+	// all hits; a bigger frame simply recomputes what does not fit.
+	capIDJoin = 512
+)

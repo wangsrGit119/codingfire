@@ -1,0 +1,199 @@
+package gui
+
+import (
+	"fmt"
+	"log"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// svgAnimStaleNs is the heartbeat threshold for detecting an
+// animated SVG whose shape has been removed from the layout
+// tree. Generous enough to survive a few slow frames (e.g.
+// expensive relayout of a large list).
+const svgAnimStaleNs = 2 * int64(time.Second)
+
+// SvgCfg configures an SVG view component.
+type SvgCfg struct {
+	OnClick func(EventCtx)
+
+	ID string
+	// FileName loads the SVG from a file path. SvgData is the inline
+	// alternative; one of the two must be set.
+	// exportaudit:keep — caller-facing config (issue #372)
+	FileName string // SVG file path
+	SvgData  string // OR inline SVG string
+
+	// HoveredElementID / FocusedElementID drive CSS :hover / :focus
+	// pseudo-class matching. Set non-empty to flag the matching SVG
+	// element id as hovered/focused; cascade re-runs and the parsed
+	// result is cached separately per (id, state). Apps that want
+	// mouse-driven hover should hit-test paths in the cached result
+	// and feed the discovered element id back here on the next render.
+	HoveredElementID string
+	FocusedElementID string
+
+	// Accessibility
+	A11YCfg
+	Padding Padding
+	Width   float32 // display width
+	Height  float32 // display height
+
+	// FlatnessTolerance, when > 0, overrides the default tessellation
+	// tolerance floor (0.15 viewBox units). Higher = coarser triangles
+	// = lower vertex count. Cached separately per value.
+	FlatnessTolerance float32
+
+	Color  Color // override fill (for monochrome icons)
+	Sizing Sizing
+	// NoAnimate disables SMIL animation (default: animated).
+	// exportaudit:keep — caller-facing config (issue #372)
+	NoAnimate bool // disable SMIL animation (default: animated)
+
+	// Sound overrides the theme's click cue for this instance.
+	// SoundNone (the zero value) takes Theme.Sounds.Click, which is
+	// itself silent unless the app opted in (issue #446).
+	// exportaudit:keep — caller-facing config (issue #467)
+	Sound SoundCue
+
+	// SoundDisabled suppresses this svg's sound regardless of the theme
+	// and of Sound above.
+	// exportaudit:keep — caller-facing config (issue #467)
+	SoundDisabled bool
+}
+
+// svgView implements View for SVG rendering.
+type svgView struct {
+	cfg SvgCfg
+}
+
+// Svg creates an SVG view from file or inline data.
+func Svg(cfg SvgCfg) View {
+	return &svgView{cfg: cfg}
+}
+
+func (sv *svgView) GenerateLayout(w *Window) Layout {
+	c := &sv.cfg
+	svgSrc := c.FileName
+	if svgSrc == "" {
+		svgSrc = c.SvgData
+	}
+
+	width := c.Width
+	height := c.Height
+
+	if width <= 0 || height <= 0 {
+		natW, natH, err := w.getSvgDimensions(svgSrc)
+		if err != nil {
+			log.Printf("svg: %v", err)
+			return svgErrorLayout(svgSrc, w)
+		}
+		if width <= 0 {
+			width = natW
+		}
+		if height <= 0 {
+			height = natH
+		}
+	}
+
+	var svgOpts *SvgParseOpts
+	if c.FlatnessTolerance > 0 || c.HoveredElementID != "" ||
+		c.FocusedElementID != "" {
+		svgOpts = &SvgParseOpts{
+			FlatnessTolerance: c.FlatnessTolerance,
+			HoveredElementID:  c.HoveredElementID,
+			FocusedElementID:  c.FocusedElementID,
+		}
+	}
+
+	var cached *CachedSvg
+	var err error
+	if svgOpts != nil {
+		cached, err = w.LoadSvgWithOpts(svgSrc, width, height, *svgOpts)
+	} else {
+		cached, err = w.LoadSvg(svgSrc, width, height)
+	}
+	if err != nil {
+		log.Printf("svg: %v", err)
+		return svgErrorLayout(svgSrc, w)
+	}
+
+	// Register animation loop for animated SVGs.
+	if cached.hasAnimations && !c.NoAnimate {
+		animHash := cached.animHash
+		animSeen := StateMap[string, int64](
+			w, nsSvgAnimSeen, capImageCache)
+		animSeen.Set(animHash, time.Now().UnixNano())
+		animID := ScopeID("svg_anim", animHash)
+		if !w.HasAnimation(animID) {
+			w.AnimationAdd(&Animate{
+				AnimID:  animID,
+				Delay:   animationCycle,
+				Repeat:  true,
+				Refresh: AnimationRefreshRenderOnly,
+				Callback: func(an *Animate, w *Window) {
+					seenMap := StateMap[string, int64](
+						w, nsSvgAnimSeen, capImageCache)
+					seen, ok := seenMap.Get(animHash)
+					if !ok {
+						an.stopped = true
+						return
+					}
+					if time.Now().UnixNano()-seen > svgAnimStaleNs {
+						an.stopped = true
+						return
+					}
+					w.markRenderOnlyRefresh()
+				},
+			})
+		}
+	}
+
+	// Guard unchanged: a cue with no OnClick can never sound, because
+	// playShapeSound only runs on the OnClick path (issue #467).
+	var events *eventHandlers
+	if c.OnClick != nil {
+		events = w.allocEventHandlers(eventHandlers{
+			OnClick:     c.OnClick,
+			clickButton: MouseLeft,
+			soundCue: resolveSoundCue(
+				guiTheme.Sounds.Click, c.Sound, c.SoundDisabled),
+		})
+	}
+	layout := Layout{
+		Shape: w.allocShape(Shape{
+			shapeType: shapeSVG,
+			ID:        c.ID,
+			A11YRole:  AccessRoleImage,
+			a11Y:      c.a11yInfo(c.ID),
+			Resource:  svgSrc,
+			Width:     width,
+			Height:    height,
+			Color:     c.Color,
+			Opacity:   1,
+			Sizing:    c.Sizing,
+			Padding:   c.Padding.Or(PaddingNone),
+			events:    events,
+			svgOpts:   svgOpts,
+		}),
+	}
+	applyFixedSizingConstraints(layout.Shape)
+	return layout
+}
+
+// svgErrorLayout returns a magenta error text for missing SVGs.
+// Uses basename only to avoid leaking filesystem paths.
+func svgErrorLayout(src string, w *Window) Layout {
+	name := src
+	if !strings.HasPrefix(src, "<") {
+		name = filepath.Base(src)
+	}
+	ts := guiTheme.TextStyleDef
+	ts.Color = magenta
+	tv := Text(TextCfg{
+		Text:      fmt.Sprintf("[missing: %s]", name),
+		TextStyle: ts,
+	})
+	return tv.GenerateLayout(w)
+}

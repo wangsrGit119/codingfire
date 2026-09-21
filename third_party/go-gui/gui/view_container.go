@@ -1,0 +1,617 @@
+package gui
+
+// ContainerCfg configures container views ([Column], [Row], [Canvas],
+// [Circle], [Wrap]). Containers layout children vertically,
+// horizontally, or freely with sizing, alignment, scrolling,
+// floating, borders, and event handling.
+//
+// # Title and group-box style
+//
+// When Title is set, the container renders a group-box label in the
+// top border — like an HTML fieldset/legend. TitleBG must match the
+// parent background color to erase the border behind the title text.
+type ContainerCfg struct {
+	ColorFilter    *ColorFilter
+	Shadow         *BoxShadow
+	Gradient       *GradientDef
+	BorderGradient *GradientDef
+	Shader         *Shader
+
+	a11Y *accessInfo
+
+	// Event handlers
+	OnClick     func(EventCtx)
+	OnAnyClick  func(EventCtx)
+	OnChar      func(EventCtx)
+	OnKeyDown   func(EventCtx)
+	OnKeyUp     func(EventCtx)
+	OnMouseMove func(EventCtx)
+	OnMouseDown func(EventCtx)
+	OnMouseUp   func(EventCtx)
+
+	// ClickButton filters OnClick by mouse button (0 = any).
+	// Set to MouseLeft for left-click-only widgets; avoids the
+	// per-frame closure allocation from leftClickOnly.
+	clickButton MouseButton
+
+	// ClickOnSpace fires OnClick on spacebar via the char dispatch
+	// path. Avoids the per-frame closure allocation from
+	// spacebarToClick.
+	// exportaudit:keep — caller-facing config (issue #372)
+	ClickOnSpace bool
+
+	// ClickOnEnter fires OnClick on Enter key via the key-down
+	// dispatch path. Avoids the per-frame closure allocation from
+	// enterToClick.
+	// exportaudit:keep — caller-facing config (issue #372)
+	ClickOnEnter bool
+
+	// Sound is the cue emitted when OnClick fires. SoundNone (the
+	// zero value) is silent. Widget factories resolve this from the
+	// theme's SoundSet before building the container, so a caller
+	// setting it here overrides the theme for this instance.
+	// Nothing is audible until the app installs a SoundPlayer.
+	// exportaudit:keep — caller-facing config (issue #446)
+	Sound SoundCue
+
+	// OnScroll fires when the container receives scroll events.
+	// Requires Scrollable and a scrollable Overflow/ScrollMode.
+	// exportaudit:keep — caller-facing config (issue #372)
+	OnScroll func(EventCtx)
+
+	// AmendLayout runs after sizing to reposition overlays
+	// (color picker circles, splitter handles) or manage hover
+	// indicators. Coordinates are absolute.
+	AmendLayout func(EventCtx)
+
+	OnHover    func(EventCtx)
+	OnGesture  func(EventCtx)
+	OnFileDrop func(EventCtx)
+	// OnIMECommit fires when an IME composition commits. Requires
+	// an active input session; use with IsIMEEnabled.
+	// exportaudit:keep — caller-facing config (issue #372)
+	OnIMECommit func(string, EventCtx)
+
+	// ScrollbarCfgX/Y override scrollbar appearance for this
+	// container. nil uses theme defaults. Only active when
+	// Scrollable.
+	ScrollbarCfgX *ScrollbarCfg
+	ScrollbarCfgY *ScrollbarCfg
+
+	// Identity
+	ID string
+
+	// Title renders a group-box label in the top border. See the
+	// type doc for TitleBG requirements.
+	Title string
+	A11YCfg
+
+	// Content holds the child views displayed inside this container.
+	Content []View
+
+	FloatZIndex int
+
+	Padding Padding
+
+	// Layout
+	Spacing    Opt[float32]
+	SizeBorder Opt[float32]
+	Radius     Opt[float32]
+	Opacity    Opt[float32]
+	Width      float32
+	Height     float32
+	// MinWidth floors the arranged width, except on a Fixed-width
+	// axis with a positive Width, where it is overwritten with
+	// Width and never takes effect (issue #635). Zero means unset.
+	MinWidth float32
+	// MaxWidth caps the arranged width, except on a Fixed-width
+	// axis with a positive Width, where it is overwritten with
+	// Width and never takes effect (issue #635). Zero means unset.
+	MaxWidth float32
+	// MinHeight floors the arranged height, except on a
+	// Fixed-height axis with a positive Height, where it is
+	// overwritten with Height and never takes effect (issue #635).
+	// Zero means unset.
+	MinHeight float32
+	// MaxHeight caps the arranged height, except on a Fixed-height
+	// axis with a positive Height, where it is overwritten with
+	// Height and never takes effect (issue #635). Zero means unset.
+	MaxHeight float32
+
+	BlurRadius float32
+
+	// Behavior
+	Focusable bool
+
+	// Scrollable opts the container into the scroll system. Scroll
+	// state is keyed by Cfg.ID — pass that same id to
+	// Window.ScrollVerticalTo and friends. Requires a non-empty ID.
+	Scrollable   bool
+	FloatOffsetX float32
+	FloatOffsetY float32
+
+	// Position
+	X float32
+	Y float32
+
+	A11YState AccessState
+
+	// TitleBG is the background color behind the group-box title
+	// text. Must match the parent container's background to erase
+	// the border line behind the title.
+	TitleBG Color
+
+	Color       Color
+	ColorBorder Color
+
+	// Sizing
+	Sizing Sizing
+
+	// HAlign places the child boxes, not the text inside them. A child
+	// that fills the axis has nowhere to move, so alignment does
+	// nothing to it. To align the lines within a text box, set
+	// TextStyle.Align.
+	HAlign   HorizontalAlign // ergonomics-audit:opt-plain — zero (HAlignStart) is the natural default; no distinct unset behavior
+	VAlign   verticalAlign   // ergonomics-audit:opt-plain — zero (VAlignTop) is the natural default; no distinct unset behavior
+	TextDir  textDirection
+	Wrap     bool
+	Overflow bool
+
+	ScrollMode scrollMode
+	Clip       bool
+	// ClipContents clips children to the container bounds. Default
+	// false; containers clip via ScrollMode/Overflow when scrollable.
+	// exportaudit:keep — caller-facing config (issue #372)
+	ClipContents bool
+	FocusSkip    bool
+	Disabled     bool
+	Invisible    bool
+	OverDraw     bool
+	Hero         bool
+
+	// AnimSnap holds layout-transition channels still for this
+	// container and everything under it — AnimSnapSize to slide
+	// without stretching, AnimSnapAll to exclude a scroll viewport or
+	// grid body from a transition running elsewhere on screen. Zero
+	// animates normally.
+	AnimSnap AnimFlags
+
+	// Floating
+	Float bool
+	// FloatAutoFlip mirrors the float to the opposite side when it
+	// would cross the window edge.
+	// exportaudit:keep — caller-facing config (issue #372)
+	FloatAutoFlip bool
+	FloatAnchor   floatAttach
+	FloatTieOff   floatAttach
+
+	// Accessibility
+	A11YRole AccessRole
+
+	// Internal — set by factory functions.
+	axis                 Axis
+	shapeType            shapeType // zero = shapeRectangle
+	scrollbarOrientation ScrollbarOrientation
+}
+
+func applyContainerDefaults(cfg *ContainerCfg) (spacing, sizeBorder, radius float32, padding Padding) {
+	d := &defaultContainerStyle
+	return cfg.Spacing.Get(d.Spacing),
+		cfg.SizeBorder.Get(d.SizeBorder),
+		cfg.Radius.Get(d.Radius),
+		cfg.Padding.Or(d.Padding)
+}
+
+// containerView implements View for container-based layouts.
+// ContainerCfg is stored by value; the Shape is built per
+// GenerateLayout call using pooled allocs (allocShape,
+// allocEventHandlers, allocEffects). This eliminates the
+// factory-phase &Shape{} heap alloc at the cost of rebuilding
+// ~70 fields each frame. Cached views (combobox/command-palette
+// dropdowns) re-pay the build cost without heap allocs.
+type containerView struct {
+	cfg     ContainerCfg
+	content []View
+
+	// Button-specific fields — set only by Button (step 4 fold-in).
+	isButton         bool
+	userOnHover      func(EventCtx)
+	userAmendLayout  func(EventCtx)
+	opticalDigits    bool
+	colorHover       Color
+	colorClick       Color
+	colorFocus       Color
+	colorBorderFocus Color
+	// labelColor, when set, is a filled variant's ColorTextOnAccent:
+	// buttonAmendLayout recolors label shapes carrying the
+	// defaulted-color marker with it (visual-refresh §6).
+	labelColor Color
+}
+
+func (cv *containerView) GenerateLayout(w *Window) Layout {
+	// A titled container is a group box: its fill is transparent, so
+	// its border and heading are its only separation from the page.
+	// The hairline wash (Theme.ColorBorder) is calibrated for filled
+	// controls and reads as nothing on a transparent ground
+	// (visual-refresh §4.1), so a group box resolves its own ink from
+	// the theme's body text. Both defaults resolve here, each frame,
+	// so a theme change is picked up at once; they cannot live in
+	// buildContainerShape, whose cfg is the caller's own.
+	cfg := cv.cfg
+	if cfg.Title != "" {
+		if !cfg.ColorBorder.IsSet() {
+			cfg.ColorBorder = groupBoxInk()
+		}
+		if !cfg.SizeBorder.IsSet() && defaultContainerStyle.SizeBorder == 0 {
+			// Light presets default the container border to 0, which
+			// would leave the group box edge-less; a titled container
+			// wants at least the hairline. A theme that states a
+			// border keeps it (applyContainerDefaults resolves it);
+			// NoBorder (SomeF(0)) is explicit and wins.
+			cfg.SizeBorder = SomeF(sizeBorderDef)
+		}
+	}
+	layout := Layout{
+		Shape: w.allocShape(buildContainerShape(&cfg, w)),
+	}
+	if cv.isButton && layout.Shape.events != nil {
+		bc := shapeButtonColors{
+			ColorHover:       cv.colorHover,
+			colorClick:       cv.colorClick,
+			ColorFocus:       cv.colorFocus,
+			ColorBorderFocus: cv.colorBorderFocus,
+			OnHover:          cv.userOnHover,
+			OnAmend:          cv.userAmendLayout,
+			opticalDigits:    cv.opticalDigits,
+			focusRing:        guiTheme.focusRing,
+			labelColor:       cv.labelColor,
+		}
+		if w != nil {
+			layout.Shape.bc = w.scratch.buttonColors.alloc(bc)
+		} else {
+			layout.Shape.bc = &bc
+		}
+		layout.Shape.events.AmendLayout = buttonAmendLayout
+		layout.Shape.events.OnHover = buttonOnHover
+	}
+	addGroupBoxTitle(cfg.Title, cfg.TitleBG, cfg.ColorBorder,
+		cfg.Disabled, w, &layout)
+	// Content children append after the group-box eraser + label, which
+	// addGroupBoxTitle injected above; see appendChildViews ordering.
+	appendChildViews(w, &layout, cv.content)
+	return layout
+}
+
+// groupBoxInkAlpha is the one de-emphasis amount a group box's
+// border and heading share: body text at this alpha reads on both
+// polarities where the hairline wash does not. A named constant, so
+// the ergonomics-audit visual gate treats it as a role source, not a
+// call-site literal.
+const groupBoxInkAlpha = 0.6
+
+// groupBoxInk returns the contrast-matched ink a titled container's
+// border and heading use when the caller leaves ColorBorder unset. It
+// derives from the theme's own body text, so every theme — preset or
+// custom — gets an edge that reads on its page without a per-theme
+// literal (visual-refresh §4.1 keeps the wash for filled controls).
+func groupBoxInk() Color {
+	ts := guiTheme.TextStyleDef
+	if !ts.Color.IsSet() {
+		ts = DefaultTextStyle
+	}
+	return ts.Color.WithOpacity(groupBoxInkAlpha)
+}
+
+// addGroupBoxTitle injects floating eraser + text children to render
+// a title label in the container's top border (HTML fieldset style).
+func addGroupBoxTitle(title string, titleBG, colorBorder Color,
+	disabled bool, w *Window, layout *Layout) {
+	if len(title) == 0 {
+		return
+	}
+	// A group-box title is a heading role and takes a B rung
+	// (visual-refresh §2.2); the border color below is the only
+	// restyle.
+	ts := guiTheme.B3
+
+	var textWidth, fontHeight float32
+	const pad float32 = 5
+	if w.textMeasurer != nil {
+		textWidth = w.textMeasurer.TextWidth(title, ts)
+		fontHeight = w.textMeasurer.FontHeight(ts)
+	} else {
+		// Fallback for tests without a text measurer.
+		textWidth = float32(len(title)) * 8
+		fontHeight = 16
+	}
+	// Center the title vertically on the top border line.
+	offset := fontHeight / 2
+
+	eraserColor := titleBG
+	if !eraserColor.IsSet() {
+		eraserColor = ColorTransparent
+	}
+	if disabled {
+		eraserColor = dimAlpha(eraserColor)
+	}
+
+	// Eraser hides the border behind the title text.
+	eraserShape := Shape{
+		shapeType: shapeRectangle,
+		Width:     textWidth + pad + pad - 1,
+		Height:    fontHeight,
+		X:         20,
+		Y:         -offset,
+		Color:     eraserColor,
+		Opacity:   1.0,
+		Float:     true,
+	}
+	layout.Children = append(layout.Children, Layout{
+		Shape: w.allocShape(eraserShape),
+	})
+
+	textColor := colorBorder
+	if disabled {
+		// The title shapes are Float and leave the main tree in
+		// layoutRemoveFloatingLayouts, so layoutDisables never
+		// stamps them: the disabled amount has to be applied here,
+		// not at render (issue #341).
+		textColor = guiTheme.disabledTextColor(textColor)
+	}
+	ts.Color = textColor
+	textShape := Shape{
+		shapeType: shapeText,
+		Width:     textWidth,
+		Height:    fontHeight,
+		X:         20 + pad,
+		Y:         -offset,
+		Color:     textColor,
+		Opacity:   1.0,
+		Float:     true,
+		TC: &shapeTextConfig{
+			Text:      title,
+			TextStyle: &ts,
+		},
+	}
+	layout.Children = append(layout.Children, Layout{
+		Shape: w.allocShape(textShape),
+	})
+}
+
+func makeContainerEffects(c *ContainerCfg) (shapeEffects, bool) {
+	if c.Shadow == nil && c.Gradient == nil &&
+		c.BorderGradient == nil && c.Shader == nil &&
+		c.ColorFilter == nil && c.BlurRadius == 0 {
+		return shapeEffects{}, false
+	}
+	return shapeEffects{
+		Shadow:         c.Shadow,
+		Gradient:       c.Gradient,
+		BorderGradient: c.BorderGradient,
+		Shader:         c.Shader,
+		ColorFilter:    c.ColorFilter,
+		BlurRadius:     c.BlurRadius,
+	}, true
+}
+
+func makeContainerEvents(c *ContainerCfg) (eventHandlers, bool) {
+	if c.OnClick == nil && c.OnChar == nil &&
+		c.OnKeyDown == nil && c.OnKeyUp == nil &&
+		c.OnMouseMove == nil && c.OnMouseUp == nil &&
+		c.OnMouseDown == nil &&
+		c.OnHover == nil && c.OnGesture == nil &&
+		c.OnFileDrop == nil && c.OnIMECommit == nil &&
+		c.OnScroll == nil && c.AmendLayout == nil &&
+		c.Sound == SoundNone {
+		return eventHandlers{}, false
+	}
+	return eventHandlers{
+		OnClick:      c.OnClick,
+		OnChar:       c.OnChar,
+		OnKeyDown:    c.OnKeyDown,
+		OnKeyUp:      c.OnKeyUp,
+		OnMouseMove:  c.OnMouseMove,
+		OnMouseDown:  c.OnMouseDown,
+		OnMouseUp:    c.OnMouseUp,
+		OnHover:      c.OnHover,
+		OnGesture:    c.OnGesture,
+		OnFileDrop:   c.OnFileDrop,
+		onIMECommit:  c.OnIMECommit,
+		onScroll:     c.OnScroll,
+		AmendLayout:  c.AmendLayout,
+		clickButton:  c.clickButton,
+		clickOnSpace: c.ClickOnSpace,
+		clickOnEnter: c.ClickOnEnter,
+		soundCue:     c.Sound,
+	}, true
+}
+
+func makeContainerA11Y(c *ContainerCfg) *accessInfo {
+	if c.a11Y != nil {
+		return c.a11Y
+	}
+	return c.a11yInfo("")
+}
+
+func deriveContainerA11YRole(c *ContainerCfg) AccessRole {
+	if c.A11YRole != AccessRoleNone {
+		return c.A11YRole
+	}
+	if c.Scrollable {
+		return AccessRoleScrollArea
+	}
+	return AccessRoleNone
+}
+
+// buildContainerShape constructs a Shape from a ContainerCfg.
+// Uses pooled allocs for effects and events via w.
+func buildContainerShape(cfg *ContainerCfg, w *Window) Shape {
+	requireScrollID("container", cfg.Scrollable, cfg.ID)
+	requireOverflowID("container", cfg.Overflow, cfg.ID)
+	spacing, sizeBorder, radius, padding := applyContainerDefaults(cfg)
+	shapeType := cfg.shapeType
+	if shapeType == shapeNone {
+		shapeType = shapeRectangle
+	}
+	shape := Shape{
+		shapeType:            shapeType,
+		ID:                   cfg.ID,
+		Focusable:            cfg.Focusable,
+		Axis:                 cfg.axis,
+		scrollbarOrientation: cfg.scrollbarOrientation,
+		X:                    cfg.X,
+		Y:                    cfg.Y,
+		Width:                cfg.Width,
+		MinWidth:             cfg.MinWidth,
+		MaxWidth:             cfg.MaxWidth,
+		Height:               cfg.Height,
+		MinHeight:            cfg.MinHeight,
+		MaxHeight:            cfg.MaxHeight,
+		Clip:                 cfg.Clip,
+		clipContents:         cfg.ClipContents,
+		FocusSkip:            cfg.FocusSkip,
+		Spacing:              spacing,
+		Sizing:               cfg.Sizing,
+		Padding:              padding,
+		HAlign:               cfg.HAlign,
+		VAlign:               cfg.VAlign,
+		TextDir:              cfg.TextDir,
+		Radius:               radius,
+		Color:                cfg.Color,
+		SizeBorder:           sizeBorder,
+		ColorBorder:          cfg.ColorBorder,
+		Disabled:             cfg.Disabled,
+		Float:                cfg.Float,
+		floatAutoFlip:        cfg.FloatAutoFlip,
+		FloatAnchor:          cfg.FloatAnchor,
+		FloatTieOff:          cfg.FloatTieOff,
+		FloatOffsetX:         cfg.FloatOffsetX,
+		FloatOffsetY:         cfg.FloatOffsetY,
+		FloatZIndex:          cfg.FloatZIndex,
+		Scrollable:           cfg.Scrollable,
+		OverDraw:             cfg.OverDraw,
+		ScrollMode:           cfg.ScrollMode,
+		Hero:                 cfg.Hero,
+		AnimSnap:             cfg.AnimSnap,
+		Wrap:                 cfg.Wrap,
+		Overflow:             cfg.Overflow,
+		Opacity:              cfg.Opacity.Get(1.0),
+		A11YRole:             deriveContainerA11YRole(cfg),
+		A11YState:            cfg.A11YState,
+		a11Y:                 makeContainerA11Y(cfg),
+	}
+	if fx, ok := makeContainerEffects(cfg); ok {
+		shape.fx = w.allocEffects(fx)
+	}
+	if ev, ok := makeContainerEvents(cfg); ok {
+		shape.events = w.allocEventHandlers(ev)
+	}
+	warnFixedSizingConflict(w, &shape)
+	applyFixedSizingConstraints(&shape)
+	return shape
+}
+
+// container is the fundamental layout builder. Factory
+// functions (Column, Row, etc.) set axis then delegate here.
+func container(cfg ContainerCfg) View {
+	if cfg.Invisible {
+		return invisibleContainerView()
+	}
+	// Resolve click handler.
+	if cfg.OnAnyClick != nil {
+		cfg.OnClick = cfg.OnAnyClick
+	} else {
+		cfg.clickButton = MouseLeft
+	}
+
+	content := cfg.Content
+	if cfg.Scrollable {
+		content = make([]View, 0, len(cfg.Content)+2)
+		content = append(content, cfg.Content...)
+		content = appendScrollbar(content, cfg.ScrollbarCfgX,
+			scrollbarHorizontal, cfg.ID)
+		content = appendScrollbar(content, cfg.ScrollbarCfgY,
+			scrollbarVertical, cfg.ID)
+	}
+
+	return &containerView{
+		cfg:     cfg,
+		content: content,
+	}
+}
+
+// Column arranges content top to bottom.
+func Column(cfg ContainerCfg) View {
+	cfg.axis = axisTopToBottom
+	return container(cfg)
+}
+
+// Row arranges content left to right.
+func Row(cfg ContainerCfg) View {
+	cfg.axis = axisLeftToRight
+	return container(cfg)
+}
+
+// Wrap arranges content left to right, flowing to the next
+// line when container width is exceeded.
+//
+// Fit width on a Wrap resolves as fit-content (issue #379): the container
+// takes min(single-row sum, its nearest definite-width ancestor's
+// available), so it wraps within its parent instead of rendering one
+// unwrapped row wider than it. A Fit chain with no definite ancestor — no
+// Fixed/Fill width anywhere above — has no width to wrap within and keeps
+// the single-row sum (a Row). Prefer Fill width when the wrap should fill
+// the parent regardless.
+//
+// Setting Overflow on the same container is ignored: the two express
+// contradictory strategies for the same condition and wrap wins (issue
+// #380). gui.Debug reports the combination.
+func Wrap(cfg ContainerCfg) View {
+	cfg.axis = axisLeftToRight
+	cfg.Wrap = true
+	return container(cfg)
+}
+
+// Canvas does not arrange or layout its content.
+func Canvas(cfg ContainerCfg) View {
+	return container(cfg)
+}
+
+// Circle creates a circular container.
+func Circle(cfg ContainerCfg) View {
+	cfg.axis = axisTopToBottom
+	cfg.shapeType = shapeCircle
+	return container(cfg)
+}
+
+func appendScrollbar(content []View, override *ScrollbarCfg, orientation ScrollbarOrientation, id string) []View {
+	if override != nil {
+		if override.Overflow == ScrollbarHidden {
+			return content
+		}
+		merged := *override
+		merged.Orientation = orientation
+		merged.scrollID = id
+		return append(content, scrollbar(merged))
+	}
+	return append(content, scrollbar(ScrollbarCfg{
+		Orientation: orientation,
+		scrollID:    id,
+	}))
+}
+
+// invisibleContainerView provides a singleton immutable
+// invisible placeholder. Since containerView is now
+// cfg-by-value (no mutable template shape), a single instance
+// is safe across the lifetime of the package.
+var invisibleContainerViewSingleton = &containerView{
+	cfg: ContainerCfg{
+		Disabled: true,
+		OverDraw: true,
+		Padding:  NoPadding,
+	},
+}
+
+func invisibleContainerView() *containerView {
+	return invisibleContainerViewSingleton
+}

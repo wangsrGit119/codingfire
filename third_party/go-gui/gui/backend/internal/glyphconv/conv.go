@@ -1,0 +1,79 @@
+// Package glyphconv converts gui text styles to glyph text configs.
+package glyphconv
+
+import (
+	"github.com/go-gui-org/go-glyph"
+	"github.com/go-gui-org/go-gui/gui"
+)
+
+// GuiTextConfigFromRender builds the glyph.TextConfig for a plain
+// RenderText command: the rich style when TextStylePtr is set, the flat
+// FontName/Size/Color fallback otherwise, and the wrap-width override
+// when the command carries a width. Shared by all backends so the
+// fallback semantics cannot drift (issue #362).
+func GuiTextConfigFromRender(r *gui.RenderCmd) glyph.TextConfig {
+	var cfg glyph.TextConfig
+	if r.TextStylePtr != nil {
+		cfg = GuiStyleToGlyphConfig(*r.TextStylePtr)
+		cfg.Gradient = r.TextGradient
+	} else {
+		cfg = glyph.TextConfig{
+			Style: glyph.TextStyle{
+				FontName: r.FontName,
+				Size:     r.FontSize,
+				Color: glyph.Color{
+					R: r.Color.R,
+					G: r.Color.G,
+					B: r.Color.B,
+					A: r.Color.A,
+				},
+			},
+			Block: glyph.DefaultBlockStyle(),
+		}
+	}
+	if r.W > 0 {
+		cfg.Block.Wrap = glyph.WrapWord
+		cfg.Block.Width = r.W
+	}
+	return cfg
+}
+
+// GuiStyleToGlyphConfig converts a gui.TextStyle to a
+// glyph.TextConfig suitable for text measurement and rendering.
+func GuiStyleToGlyphConfig(s gui.TextStyle) glyph.TextConfig {
+	align := glyph.AlignLeft
+	switch s.Align {
+	case gui.TextAlignCenter:
+		align = glyph.AlignCenter
+	case gui.TextAlignRight:
+		align = glyph.AlignRight
+	}
+	return glyph.TextConfig{
+		Style: glyph.TextStyle{
+			FontName:      s.Family,
+			Size:          s.Size,
+			Color:         glyph.Color{R: s.Color.R, G: s.Color.G, B: s.Color.B, A: s.Color.A},
+			BgColor:       glyph.Color{R: s.BgColor.R, G: s.BgColor.G, B: s.BgColor.B, A: s.BgColor.A},
+			Typeface:      s.Typeface,
+			Underline:     s.Underline,
+			Strikethrough: s.Strikethrough,
+			LetterSpacing: s.LetterSpacing,
+			EmojiBoxWidth: s.EmojiBoxWidth,
+			// Grid cell size + box-glyph opt-out: rasterization inputs the plain
+			// text path must carry too, not just the rich-text path.
+			CellWidth:          s.CellWidth,
+			CellHeight:         s.CellHeight,
+			NoBuiltinBoxGlyphs: s.NoBuiltinBoxGlyphs,
+			StrokeWidth:        s.StrokeWidth,
+			StrokeColor:        glyph.Color{R: s.StrokeColor.R, G: s.StrokeColor.G, B: s.StrokeColor.B, A: s.StrokeColor.A},
+			Features:           s.Features,
+		},
+		Block: glyph.BlockStyle{
+			Align:       align,
+			Wrap:        glyph.WrapWord,
+			Width:       -1,
+			LineSpacing: s.LineSpacing,
+		},
+		Gradient: s.Gradient,
+	}
+}

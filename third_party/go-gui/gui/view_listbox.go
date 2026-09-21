@@ -1,0 +1,579 @@
+package gui
+
+var listBoxItemPad = PaddingTwoFive
+
+type listBoxView struct {
+	cfg ListBoxCfg
+}
+
+type listBoxCache struct {
+	itemIDs         []string
+	itemDataIndices []int
+	dataHash        uint64
+	// resolvedH is the list's height as resolved by the layout
+	// engine, captured after arrange (AmendLayout) each frame. The
+	// view phase runs before sizing, so virtualization under Fill
+	// sizing reads this from the previous frame. 0 until the first
+	// frame has been arranged.
+	resolvedH float32
+	// hSeen records that AmendLayout has run at least once, so a
+	// persistent 0 can be distinguished from "not arranged yet".
+	hSeen bool
+}
+
+// ListBoxOption represents one row in a ListBox.
+type ListBoxOption struct {
+	ID           string
+	Name         string
+	Value        string
+	isSubheading bool
+}
+
+// ListBoxCfg configures a list box view.
+type ListBoxCfg struct {
+	TextStyle TextStyle
+	// SubheadingStyle styles the subheader rows (options with
+	// isSubheading set). Zero takes the theme default.
+	// exportaudit:keep — caller-facing config (issue #372)
+	SubheadingStyle TextStyle
+	OnSelect        func([]string, EventCtx)
+	OnReorder       func(string, string, EventCtx)
+
+	ID string `gui:"required"`
+
+	A11YCfg
+	SelectedIDs []string
+	// Items is a convenience field for simple string lists. Each
+	// string becomes a ListBoxOption with ID==Name==Value. When
+	// set, Items takes precedence over Data.
+	Items      []string
+	Data       []ListBoxOption
+	Padding    Padding
+	Radius     Opt[float32]
+	SizeBorder Opt[float32]
+	// Height sets the list's height directly. Row virtualization
+	// needs a resolved height: with Height or MaxHeight the list
+	// virtualizes from the first frame; under Fill sizing the
+	// resolved height is read back from the previous frame's
+	// arrange, so the first frame builds every row once.
+	Height    float32
+	MinWidth  float32
+	MaxWidth  float32
+	MinHeight float32
+	// MaxHeight caps the list's height. Like Height, it resolves the
+	// height virtualization needs.
+	MaxHeight float32
+	// FocusDisabled opts out of the default-on focus. Focus also
+	// requires a non-empty ID; without one the control is inert.
+	FocusDisabled bool
+	Color         Color
+	ColorHover    Color
+	ColorBorder   Color
+	// ColorBorderFocus is the border while the list holds focus.
+	// Unset takes the theme's.
+	ColorBorderFocus Color
+	// Colors sets the per-state colors. Color above is the
+	// shorthand for Colors.Base and wins over it; the other flat
+	// Color* fields win over their Colors slots the same way.
+	Colors      ColorSet
+	ColorSelect Color
+	// ColorSelectSubtle is the tint behind a selected row — the
+	// wash, never the full accent slab; focus is the ring, not a
+	// second fill (visual-refresh §4.3). Unset takes the theme's.
+	// exportaudit:keep — caller-facing config (issue #372)
+	ColorSelectSubtle Color
+	Sizing            Sizing
+	Multiple          bool
+	Disabled          bool
+	Invisible         bool
+	Reorderable       bool
+
+	// Sound overrides the theme's selection cue for this instance.
+	// SoundNone (the zero value) takes the theme's cue for that role,
+	// which is itself silent unless the app opted in (issue #446).
+	// exportaudit:keep — caller-facing config (issue #467)
+	Sound SoundCue
+
+	// SoundDisabled suppresses every row's sound regardless of the theme
+	// and of Sound above.
+	// exportaudit:keep — caller-facing config (issue #467)
+	SoundDisabled bool
+}
+
+// ListBoxOption helpers.
+
+// NewListBoxOption constructs a ListBoxOption.
+func NewListBoxOption(id, name, value string) ListBoxOption {
+	return ListBoxOption{ID: id, Name: name, Value: value}
+}
+
+// NewListBoxSubheading constructs a subheading row.
+func NewListBoxSubheading(id, title string) ListBoxOption {
+	return ListBoxOption{ID: id, Name: title, isSubheading: true}
+}
+
+// ListBox creates a list box view.
+func ListBox(cfg ListBoxCfg) View {
+	RequireID("ListBox", cfg.ID)
+	applyListBoxDefaults(&cfg)
+	if len(cfg.Items) > 0 {
+		n := min(len(cfg.Items), maxDataConvLen)
+		cfg.Data = make([]ListBoxOption, n)
+		for i := range n {
+			cfg.Data[i] = ListBoxOption{
+				ID: cfg.Items[i], Name: cfg.Items[i],
+				Value: cfg.Items[i]}
+		}
+	}
+	if listBoxCanVirtualize(&cfg) ||
+		(cfg.Reorderable && cfg.OnReorder != nil) ||
+		!cfg.FocusDisabled {
+		return &listBoxView{cfg: cfg}
+	}
+
+	dn := &defaultListBoxStyle
+	sizeBorder := cfg.SizeBorder.Get(dn.SizeBorder)
+	radius := cfg.Radius.Get(dn.Radius)
+
+	selectedSet := listCoreSelectedSet(cfg.SelectedIDs)
+	// Built before the rows: each row's click handler moves the
+	// keyboard focus index, which is an index into this slice.
+	itemIDs := make([]string, 0, len(cfg.Data))
+	for i := range cfg.Data {
+		if !cfg.Data[i].isSubheading {
+			itemIDs = append(itemIDs, cfg.Data[i].ID)
+		}
+	}
+	list := make([]View, 0, len(cfg.Data))
+	for i := range cfg.Data {
+		list = append(list,
+			listBoxItemView(cfg.Data[i], cfg, selectedSet, "", itemIDs))
+	}
+
+	listBoxID := cfg.ID
+	isMultiple := cfg.Multiple
+	onSelect := cfg.OnSelect
+	selectedIDs := cfg.SelectedIDs
+	// Resolved once, at generation time: the keyboard path calls
+	// onSelect with a nil Layout, so it carries its cues by value
+	// rather than reading them off a shape (issue #468).
+	keyCues := resolveSoundCues(
+		guiTheme.Sounds.Selection, cfg.Sound, cfg.SoundDisabled)
+
+	return Column(ContainerCfg{
+		ID:       cfg.ID,
+		A11YRole: AccessRoleList,
+		A11YCfg: A11YCfg{
+			A11YLabel:       a11yLabel(cfg.A11YLabel, cfg.ID),
+			A11YDescription: cfg.A11YDescription,
+		},
+		Focusable:   !cfg.FocusDisabled,
+		Scrollable:  true,
+		AmendLayout: focusRingAmend(Color{}, cfg.ColorBorderFocus),
+		OnKeyDown: func(ctx EventCtx) {
+			listBoxOnKeyDown(listBoxID, itemIDs,
+				isMultiple, onSelect, selectedIDs,
+				"", 0, 0, nil, keyCues, ctx.Event, ctx.Window)
+		},
+		Width:       cfg.MaxWidth,
+		Height:      cfg.Height,
+		MinWidth:    cfg.MinWidth,
+		MaxWidth:    cfg.MaxWidth,
+		MinHeight:   cfg.MinHeight,
+		MaxHeight:   cfg.MaxHeight,
+		Color:       cfg.Color,
+		ColorBorder: cfg.ColorBorder,
+		SizeBorder:  Some(sizeBorder),
+		Radius:      Some(radius),
+		Padding:     cfg.Padding,
+		Sizing:      cfg.Sizing,
+		Spacing:     SomeF(0),
+		Disabled:    cfg.Disabled,
+		Invisible:   cfg.Invisible,
+		Content:     list,
+	})
+}
+
+// listBoxCanVirtualize reports whether the list takes the
+// virtualizing path. Every list qualifies since #504 removed the
+// Scrollable opt-in: with no configured height, virtualization starts
+// on the second frame once Arrange has resolved one.
+func listBoxCanVirtualize(cfg *ListBoxCfg) bool {
+	return cfg != nil
+}
+
+func (lv *listBoxView) GenerateLayout(w *Window) Layout {
+	cfg := &lv.cfg
+
+	// One resolved identity for every key below; see (*Window).EffID.
+	cfg.ID = w.EffID(cfg.ID)
+
+	dn := &defaultListBoxStyle
+	sizeBorder := cfg.SizeBorder.Get(dn.SizeBorder)
+	radius := cfg.Radius.Get(dn.Radius)
+
+	cache := listBoxEnsureCache(cfg, w)
+	selectedSet := listCoreSelectedSet(cfg.SelectedIDs)
+
+	first, last, virtualize, listH, rowH :=
+		listBoxVisibleRange(cfg, cache, w)
+
+	listBoxID := cfg.ID
+	isMultiple := cfg.Multiple
+	onSelect := cfg.OnSelect
+	selectedIDs := cfg.SelectedIDs
+	// Resolved once, at generation time: the keyboard path calls
+	// onSelect with a nil Layout, so it carries its cues by value
+	// rather than reading them off a shape (issue #468).
+	keyCues := resolveSoundCues(
+		guiTheme.Sounds.Selection, cfg.Sound, cfg.SoundDisabled)
+	itemIDs := cache.itemIDs
+	itemDataIndices := cache.itemDataIndices
+
+	// Keyboard focus highlight.
+	lbf := StateMap[string, int](w, nsListBoxFocus, capModerate)
+	// Default 0: start at first item; bounds-checked below.
+	focusIdx := lbf.GetOr(cfg.ID, 0)
+	var focusedID string
+	if focusIdx >= 0 && focusIdx < len(itemIDs) {
+		focusedID = itemIDs[focusIdx]
+	}
+
+	canReorder := cfg.Reorderable && cfg.OnReorder != nil
+	var drag dragReorderState
+	if canReorder {
+		drag = dragReorderGet(w, cfg.ID)
+	}
+	dragging := canReorder && drag.active && !drag.cancelled
+	onReorder := cfg.OnReorder
+	scrollID := cfg.ID
+
+	dragIdxByRow := listBoxDragIndexByRow(cfg, canReorder)
+	itemLayoutIDs, midsOffset := listBoxItemLayoutIDs(
+		cfg, canReorder, first, last)
+
+	if canReorder && (drag.started || drag.active) {
+		dragReorderIDsMetaSet(w, cfg.ID, itemIDs)
+	}
+
+	list, ghostContent := listBoxBuildItems(
+		cfg, selectedSet, focusedID, dragIdxByRow,
+		itemIDs, itemLayoutIDs, midsOffset, scrollID,
+		canReorder, dragging, drag,
+		virtualize, first, last, rowH)
+
+	if dragging && drag.currentIndex >= len(itemIDs) {
+		list = append(list,
+			dragReorderGapView(drag, dragReorderVertical))
+	}
+	if dragging && ghostContent != nil {
+		list = append(list,
+			dragReorderGhostView(drag, ghostContent))
+	}
+
+	return generateViewLayout(Column(ContainerCfg{
+		ID:       cfg.ID,
+		A11YRole: AccessRoleList,
+		A11YCfg: A11YCfg{
+			A11YLabel:       a11yLabel(cfg.A11YLabel, cfg.ID),
+			A11YDescription: cfg.A11YDescription,
+		},
+		Focusable:  !cfg.FocusDisabled,
+		Scrollable: true,
+		AmendLayout: amendAll(
+			listBoxAmendLayout(cache),
+			focusRingAmend(Color{}, cfg.ColorBorderFocus)),
+		OnKeyDown: func(ctx EventCtx) {
+			if canReorder {
+				if dragReorderEscape(
+					listBoxID, ctx.Event.KeyCode, ctx.Window) {
+					ctx.Consume()
+					return
+				}
+				lbf = StateMap[string, int](
+					ctx.Window, nsListBoxFocus, capModerate)
+				// Default 0: bounds-checked before use; zero index handled.
+				curIdx := lbf.GetOr(listBoxID, 0)
+				if curIdx >= 0 && curIdx < len(itemIDs) &&
+					dragReorderKeyboardMove(ctx.Event.KeyCode,
+						ctx.Event.Modifiers, dragReorderVertical,
+						curIdx, itemIDs, onReorder, keyCues.act,
+						ctx.Window) {
+					ctx.Consume()
+					return
+				}
+			}
+			listBoxOnKeyDown(listBoxID, itemIDs,
+				isMultiple, onSelect, selectedIDs,
+				scrollID, rowH, listH, itemDataIndices, keyCues,
+				ctx.Event, ctx.Window)
+		},
+		Width:       cfg.MaxWidth,
+		Height:      cfg.Height,
+		MinWidth:    cfg.MinWidth,
+		MaxWidth:    cfg.MaxWidth,
+		MinHeight:   cfg.MinHeight,
+		MaxHeight:   cfg.MaxHeight,
+		Color:       cfg.Color,
+		ColorBorder: cfg.ColorBorder,
+		SizeBorder:  Some(sizeBorder),
+		Radius:      Some(radius),
+		Padding:     cfg.Padding,
+		Sizing:      cfg.Sizing,
+		Spacing:     SomeF(0),
+		Disabled:    cfg.Disabled,
+		Invisible:   cfg.Invisible,
+		Content:     list,
+	}), w)
+}
+
+// listBoxEnsureCache returns or creates the list box cache for
+// the given config, refreshing item IDs when data changes.
+func listBoxEnsureCache(cfg *ListBoxCfg, w *Window) *listBoxCache {
+	cacheMap := StateMap[string, *listBoxCache](
+		w, nsListBoxCache, capModerate)
+	cache, ok := cacheMap.Get(cfg.ID)
+	if !ok || cache == nil {
+		cache = &listBoxCache{}
+		cacheMap.Set(cfg.ID, cache)
+	}
+	dataHash := listBoxDataHash(cfg.Data)
+	if cache.dataHash != dataHash || len(cache.itemIDs) == 0 {
+		itemIDs := make([]string, 0, len(cfg.Data))
+		indices := make([]int, 0, len(cfg.Data))
+		for i := range cfg.Data {
+			if !cfg.Data[i].isSubheading {
+				itemIDs = append(itemIDs, cfg.Data[i].ID)
+				indices = append(indices, i)
+			}
+		}
+		cache.itemIDs = itemIDs
+		cache.itemDataIndices = indices
+		cache.dataHash = dataHash
+	}
+	return cache
+}
+
+// listBoxVisibleRange computes the visible row range and
+// virtualization parameters for the list box. The height comes from
+// Cfg.Height, then MaxHeight, then the cache's resolvedH — the
+// height the layout engine allocated last frame, which is how Fill
+// sizing virtualizes.
+func listBoxVisibleRange(
+	cfg *ListBoxCfg, cache *listBoxCache, w *Window,
+) (first, last int, virtualize bool, listH, rowH float32) {
+	first = 0
+	last = len(cfg.Data) - 1
+	virtualize = true
+	listH = cfg.Height
+	if listH <= 0 {
+		listH = cfg.MaxHeight
+	}
+	if listH <= 0 {
+		listH = cache.resolvedH
+	}
+	rowH = listCoreRowHeightEstimate(cfg.TextStyle, listBoxItemPad, w)
+	if virtualize && listH > 0 && len(cfg.Data) > 0 {
+		// Default 0: absent entry means not scrolled.
+		scrollY := w.scrollY().GetOr(cfg.ID, 0)
+		first, last = listCoreVisibleRange(
+			len(cfg.Data), rowH, listH, scrollY)
+		// Register the same rowH the spacers use, so ScrollToIndex
+		// agrees with the arithmetic already on screen. Index space:
+		// cfg.Data, subheadings included.
+		listHeightRegisterUniform(w, cfg.ID, len(cfg.Data), rowH, 0, 0)
+	} else {
+		virtualize = false
+		if cache.hSeen && len(cfg.Data) > 0 && DebugEnabled() {
+			// The layout has run at least once and still gave the
+			// list no height, so every row builds each frame.
+			w.debugWarn(debugCheckListBoxNoHeight, cfg.ID,
+				"scrollable listbox %q resolved to height 0, so "+
+					"virtualization is off and all %d rows build "+
+					"every frame; set Height/MaxHeight or give it "+
+					"sizing that allocates height",
+				cfg.ID, len(cfg.Data))
+		}
+	}
+	return first, last, virtualize, listH, rowH
+}
+
+// listBoxAmendLayout captures the arranged height into the cache so
+// the next frame's view phase can virtualize against it. Runs after
+// sizing, when Shape.Height holds the resolved height — including
+// the Fill-allocated height the view phase cannot know.
+func listBoxAmendLayout(cache *listBoxCache) func(EventCtx) {
+	return func(ctx EventCtx) {
+		if ctx.Layout == nil || ctx.Layout.Shape == nil {
+			return
+		}
+		// Guard against a non-finite or degenerate height: a
+		// non-finite value would flow into listCoreVisibleRange's
+		// float→int division.
+		if h := ctx.Layout.Shape.Height; h > 0 && f32IsFinite(h) {
+			cache.resolvedH = h
+		}
+		cache.hSeen = true
+	}
+}
+
+// listBoxDragIndexByRow builds a mapping from data row index to
+// draggable item index (-1 for subheadings).
+func listBoxDragIndexByRow(
+	cfg *ListBoxCfg, canReorder bool,
+) []int {
+	if !canReorder {
+		return nil
+	}
+	dragIdxByRow := make([]int, len(cfg.Data))
+	di := 0
+	for i := range cfg.Data {
+		if !cfg.Data[i].isSubheading {
+			dragIdxByRow[i] = di
+			di++
+		} else {
+			dragIdxByRow[i] = -1
+		}
+	}
+	return dragIdxByRow
+}
+
+func listBoxOnKeyDown(
+	listBoxID string,
+	itemIDs []string,
+	isMultiple bool,
+	onSelect func([]string, EventCtx),
+	selectedIDs []string,
+	scrollID string, rowH, listH float32,
+	itemDataIndices []int,
+	cues soundCues,
+	e *Event,
+	w *Window,
+) {
+	if len(itemIDs) == 0 || onSelect == nil {
+		return
+	}
+
+	action := listCoreNavigate(e.KeyCode, len(itemIDs))
+	if e.KeyCode == KeySpace {
+		action = listCoreSelectItem
+	}
+	if action == listCoreNone {
+		return
+	}
+	e.IsHandled = true
+
+	lbf := StateMap[string, int](w, nsListBoxFocus, capModerate)
+	// Default 0: bounds-checked before use; zero index handled.
+	curIdx := lbf.GetOr(listBoxID, 0)
+
+	if action == listCoreSelectItem {
+		if curIdx >= 0 && curIdx < len(itemIDs) {
+			datID := itemIDs[curIdx]
+			ids := listBoxNextSelectedIDs(
+				selectedIDs, datID, isMultiple)
+			// Keyboard activation reaches onSelect directly, with a
+			// nil Layout, so dispatch never sees it and the row's own
+			// cue cannot fire (issue #468).
+			playSoundCue(cues.act, w)
+			onSelect(ids, EventCtx{nil, e, w})
+		}
+		return
+	}
+
+	next, changed := listCoreApplyNav(action, curIdx, len(itemIDs))
+	if changed {
+		lbf.Set(listBoxID, next)
+		if scrollID != "" && rowH > 0 {
+			scrollEnsureVisible(scrollID,
+				listBoxDataIndex(itemDataIndices, next),
+				rowH, listH, w)
+		}
+		w.InvalidateLayout()
+		return
+	}
+	// Already at the first or last row. Movement itself is silent by
+	// decision — a held arrow key would machine-gun the cue — so the
+	// refusal is the only thing worth hearing (issue #468).
+	playSoundCue(cues.reject, w)
+}
+
+func applyListBoxDefaults(cfg *ListBoxCfg) {
+	d := &defaultListBoxStyle
+	cfg.Colors = cfg.Colors.resolved(cfg.Color, themeColorSet(
+		d.Color, d.ColorHover, Color{},
+		Color{}, d.ColorBorder, d.ColorBorderFocus,
+	))
+	cfg.Colors.applyTo(&cfg.Color, &cfg.ColorHover, nil, nil,
+		&cfg.ColorBorder, &cfg.ColorBorderFocus)
+	// A caller-set ColorSelect is an explicit override and wins over
+	// the theme's wash (subtleSlot). Resolved before the theme fill
+	// below, so IsSet still tells caller-set from theme-set.
+	subtleSlot(&cfg.ColorSelectSubtle, cfg.ColorSelect, d.ColorSelectSubtle)
+	if !cfg.ColorSelect.IsSet() {
+		cfg.ColorSelect = d.ColorSelect
+	}
+	if !cfg.Padding.IsSet() {
+		cfg.Padding = d.Padding
+	}
+
+	if cfg.TextStyle == (TextStyle{}) {
+		cfg.TextStyle = d.textStyleNormal
+	}
+	if cfg.SubheadingStyle == (TextStyle{}) {
+		cfg.SubheadingStyle = d.subheadingStyle
+	}
+}
+
+// listBoxDataHash hashes the fields the list box cache derives
+// from: ID and IsSubheading. Name and Value never reach the cache, so
+// hashing them would burn O(data) time every frame for nothing.
+func listBoxDataHash(items []ListBoxOption) uint64 {
+	h := Fnv64Offset
+	for i := range items {
+		it := items[i]
+		h = Fnv64Str(h, it.ID)
+		h = Fnv64Byte(h, fnvUnitSep)
+		if it.isSubheading {
+			h = Fnv64Byte(h, 1)
+		} else {
+			h = Fnv64Byte(h, 0)
+		}
+		h = Fnv64Byte(h, fnvUnitSep)
+	}
+	return h
+}
+
+// listBoxFocusOnClick moves the keyboard focus row onto the clicked
+// item and gives the list itself window focus.
+//
+// Without this a click moves the selection while the focus highlight
+// stays wherever the keyboard last left it, so the list paints two
+// indicators on two different rows and the next arrow key jumps back
+// to the stale one. The tree does the same in treeRowClick.
+//
+// The list's ID and its focus opt-out are passed as scalars rather
+// than as the ListBoxCfg they come from: the caller is a per-row
+// OnClick closure, and closing over the whole Cfg would heap-allocate
+// it once per row per frame in the view phase.
+func listBoxFocusOnClick(
+	listBoxID string, focusDisabled bool,
+	itemIDs []string, datID string, w *Window,
+) {
+	if listBoxID == "" || w == nil {
+		return
+	}
+	for i, id := range itemIDs {
+		if id == datID {
+			lbf := StateMap[string, int](
+				w, nsListBoxFocus, capModerate)
+			lbf.Set(listBoxID, i)
+			break
+		}
+	}
+	// Only the focusable list may claim window focus; a
+	// FocusDisabled list keeps whatever had it.
+	if !focusDisabled {
+		w.SetFocus(listBoxID)
+	}
+}

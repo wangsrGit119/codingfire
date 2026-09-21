@@ -1,0 +1,536 @@
+package datagrid
+
+import (
+	"cmp"
+	"errors"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	gg "github.com/go-gui-org/go-gui/gui"
+)
+
+const dataGridSourceMaxPageLimit = 10000
+
+// GridDataRequest is the request payload for FetchData.
+// exportaudit:keep — reachable from an exported signature
+type GridDataRequest struct {
+	page      GridPageRequest
+	Signal    *gg.GridAbortSignal
+	Query     GridQueryState
+	gridID    string
+	RequestID uint64
+}
+
+// GridDataResult is the response from FetchData.
+// exportaudit:keep — reachable from an exported signature
+type GridDataResult struct {
+	nextCursor    string
+	prevCursor    string
+	Rows          []GridRow
+	RowCount      int // -1 when unknown
+	ReceivedCount int
+	hasMore       bool
+}
+
+// GridDataCapabilities describes what a data source supports.
+// exportaudit:keep — reachable from an exported signature
+type GridDataCapabilities struct {
+	supportsCursorPagination bool
+	supportsOffsetPagination bool
+	supportsNumberedPages    bool
+	rowCountKnown            bool
+	supportsCreate           bool
+	supportsUpdate           bool
+	supportsDelete           bool
+	supportsBatchDelete      bool
+}
+
+// GridMutationRequest is the request payload for MutateData.
+// exportaudit:keep — reachable from an exported signature
+type GridMutationRequest struct {
+	Signal    *gg.GridAbortSignal
+	Query     GridQueryState
+	gridID    string
+	Rows      []GridRow
+	rowIDs    []string
+	edits     []GridCellEdit
+	RequestID uint64
+	Kind      gridMutationKind
+}
+
+// GridMutationResult is the response from MutateData.
+// exportaudit:keep — reachable from an exported signature
+type GridMutationResult struct {
+	Errors     map[string]string
+	created    []GridRow
+	updated    []GridRow
+	deletedIDs []string
+	RowCount   int // -1 when unknown
+}
+
+// DataGridDataSource is the interface for grid data providers.
+//
+//nolint:revive // DataGrid prefix intentional
+type DataGridDataSource interface {
+	Capabilities() GridDataCapabilities
+	FetchData(req GridDataRequest) (GridDataResult, error)
+	MutateData(req GridMutationRequest) (GridMutationResult, error)
+}
+
+// InMemoryDataSource implements DataGridDataSource using an
+// in-memory row slice.
+type InMemoryDataSource struct {
+	Rows           []GridRow
+	DefaultLimit   int
+	LatencyMs      int
+	mu             sync.RWMutex
+	rowCountKnown  bool
+	SupportsCursor bool
+	supportsOffset bool
+}
+
+// NewInMemoryDataSource creates an InMemoryDataSource with
+// sensible defaults.
+func NewInMemoryDataSource(rows []GridRow) *InMemoryDataSource {
+	return &InMemoryDataSource{
+		Rows:           rows,
+		DefaultLimit:   100,
+		rowCountKnown:  true,
+		SupportsCursor: true,
+		supportsOffset: true,
+	}
+}
+
+// Capabilities returns the supported operations for in-memory data.
+// exportaudit:keep — exported DataSource interface method
+func (s *InMemoryDataSource) Capabilities() GridDataCapabilities {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return GridDataCapabilities{
+		supportsCursorPagination: s.SupportsCursor,
+		supportsOffsetPagination: s.supportsOffset,
+		supportsNumberedPages:    s.supportsOffset,
+		rowCountKnown:            s.rowCountKnown,
+		supportsCreate:           true,
+		supportsUpdate:           true,
+		supportsDelete:           true,
+		supportsBatchDelete:      true,
+	}
+}
+
+// FetchData returns paginated rows from in-memory storage.
+// exportaudit:keep — exported DataSource interface method
+func (s *InMemoryDataSource) FetchData(req GridDataRequest) (GridDataResult, error) {
+	if err := dataGridSourceSleepWithAbort(req.Signal, s.LatencyMs); err != nil {
+		return GridDataResult{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows := make([]GridRow, len(s.Rows))
+	copy(rows, s.Rows)
+	defaultLimit := s.DefaultLimit
+	rowCountKnown := s.rowCountKnown
+	// latencyMs=0: sleep already applied above; inner call
+	// degenerates to abort-check only.
+	return dataGridSourceInMemoryFetch(
+		rows, defaultLimit, 0, rowCountKnown, req)
+}
+
+// MutateData applies create/update/delete mutations to in-memory rows.
+// exportaudit:keep — exported DataSource interface method
+func (s *InMemoryDataSource) MutateData(req GridMutationRequest) (GridMutationResult, error) {
+	if err := dataGridSourceSleepWithAbort(req.Signal, s.LatencyMs); err != nil {
+		return GridMutationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return dataGridSourceInMemoryMutate(
+		&s.Rows, 0, s.rowCountKnown, req)
+}
+
+func dataGridSourceInMemoryFetch(
+	rows []GridRow, defaultLimit, latencyMs int,
+	rowCountKnown bool, req GridDataRequest,
+) (GridDataResult, error) {
+	if err := dataGridSourceSleepWithAbort(req.Signal, latencyMs); err != nil {
+		return GridDataResult{}, err
+	}
+	filtered := dataGridSourceApplyQuery(rows, req.Query)
+	limit := max(1, min(dataGridSourceMaxPageLimit,
+		nonZero(defaultLimit, 100)))
+	var start, end int
+	switch p := req.page.(type) {
+	case gridCursorPageReq:
+		s := max(0, min(len(filtered),
+			dataGridSourceCursorToIndex(p.Cursor)))
+		chunk := max(1, min(dataGridSourceMaxPageLimit,
+			nonZero(p.limit, limit)))
+		start, end = s, min(len(filtered), s+chunk)
+	case gridOffsetPageReq:
+		start, end = dataGridSourceOffsetBounds(
+			p.StartIndex, p.endIndex, len(filtered), limit)
+	default:
+		start, end = 0, min(len(filtered), limit)
+	}
+	page := make([]GridRow, end-start)
+	copy(page, filtered[start:end])
+	if err := gridAbortCheck(req.Signal); err != nil {
+		return GridDataResult{}, err
+	}
+	_, isCursor := req.page.(gridCursorPageReq)
+	rc := -1
+	if rowCountKnown {
+		rc = len(filtered)
+	}
+	var nextCursor, prevCursor string
+	if isCursor && end < len(filtered) {
+		nextCursor = dataGridSourceCursorFromIndex(end)
+	}
+	if isCursor {
+		prevCursor = dataGridSourcePrevCursor(start, end-start)
+	}
+	return GridDataResult{
+		Rows:          page,
+		nextCursor:    nextCursor,
+		prevCursor:    prevCursor,
+		RowCount:      rc,
+		hasMore:       end < len(filtered),
+		ReceivedCount: len(page),
+	}, nil
+}
+
+func dataGridSourceInMemoryMutate(
+	rows *[]GridRow, latencyMs int,
+	rowCountKnown bool, req GridMutationRequest,
+) (GridMutationResult, error) {
+	if err := dataGridSourceSleepWithAbort(req.Signal, latencyMs); err != nil {
+		return GridMutationResult{}, err
+	}
+	work := make([]GridRow, len(*rows))
+	copy(work, *rows)
+	result, err := dataGridSourceApplyMutation(
+		&work, req.Kind, req.Rows, req.rowIDs, req.edits)
+	if err != nil {
+		return GridMutationResult{}, err
+	}
+	if err := gridAbortCheck(req.Signal); err != nil {
+		return GridMutationResult{}, err
+	}
+	*rows = work
+	rc := -1
+	if rowCountKnown {
+		rc = len(*rows)
+	}
+	return GridMutationResult{
+		created:    result.created,
+		updated:    result.updated,
+		deletedIDs: result.deletedIDs,
+		RowCount:   rc,
+	}, nil
+}
+
+// dataGridSourceOffsetBounds clamps start/end to [0,total]
+// and falls back to defaultLimit when the range is empty.
+func dataGridSourceOffsetBounds(
+	startIndex, endIndex, total, defaultLimit int,
+) (int, int) {
+	start := max(0, min(total, startIndex))
+	end := max(start, min(total, endIndex))
+	if end <= start {
+		end = min(total, start+defaultLimit)
+	}
+	return start, end
+}
+
+var errGridAborted = errors.New("grid: request aborted")
+
+func gridAbortCheck(signal *gg.GridAbortSignal) error {
+	if signal.IsAborted() {
+		return errGridAborted
+	}
+	return nil
+}
+
+func dataGridSourceSleepWithAbort(
+	signal *gg.GridAbortSignal, ms int,
+) error {
+	if ms <= 0 {
+		return gridAbortCheck(signal)
+	}
+	// Cap to prevent near-infinite sleep from a misconfigured
+	// LatencyMs. 60s is more than any reasonable test simulation.
+	if ms > 60_000 {
+		ms = 60_000
+	}
+	remaining := ms
+	for remaining > 0 {
+		if err := gridAbortCheck(signal); err != nil {
+			return err
+		}
+		step := min(remaining, 20)
+		time.Sleep(time.Duration(step) * time.Millisecond)
+		remaining -= step
+	}
+	return gridAbortCheck(signal)
+}
+
+func dataGridSourceCursorFromIndex(index int) string {
+	return "i:" + strconv.Itoa(max(0, index))
+}
+
+func dataGridSourcePrevCursor(start, pageSize int) string {
+	if start <= 0 {
+		return ""
+	}
+	return dataGridSourceCursorFromIndex(
+		max(0, start-pageSize))
+}
+
+func dataGridSourceCursorToIndex(cursor string) int {
+	idx, ok := dataGridSourceCursorToIndexOpt(cursor)
+	if !ok {
+		return 0
+	}
+	return idx
+}
+
+func dataGridSourceCursorToIndexOpt(cursor string) (int, bool) {
+	trimmed := strings.TrimSpace(cursor)
+	if trimmed == "" {
+		return 0, true
+	}
+	if strings.HasPrefix(trimmed, "i:") {
+		val := trimmed[2:]
+		if !dataGridSourceIsDecimal(val) {
+			return 0, false
+		}
+		n, _ := strconv.Atoi(val)
+		return max(0, n), true
+	}
+	if !dataGridSourceIsDecimal(trimmed) {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(trimmed)
+	return max(0, n), true
+}
+
+func dataGridSourceIsDecimal(input string) bool {
+	if input == "" {
+		return false
+	}
+	for i := range len(input) {
+		if input[i] < '0' || input[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// dataGridSourceApplyQuery filters and sorts rows in memory.
+func dataGridSourceApplyQuery(
+	rows []GridRow, query GridQueryState,
+) []GridRow {
+	if query.QuickFilter == "" && len(query.Filters) == 0 &&
+		len(query.Sorts) == 0 {
+		return rows
+	}
+	hasFilters := query.QuickFilter != "" ||
+		len(query.Filters) > 0
+	var filtered []GridRow
+	if hasFilters {
+		needle := strings.ToLower(query.QuickFilter)
+		lowered := make([]gridFilterLowered, len(query.Filters))
+		for i, f := range query.Filters {
+			lowered[i] = gridFilterLowered{
+				colID: f.ColID,
+				op:    f.Op,
+				value: strings.ToLower(f.Value),
+			}
+		}
+		filtered = make([]GridRow, 0, len(rows))
+		for _, row := range rows {
+			if dataGridSourceRowMatchesQuery(
+				row, needle, lowered) {
+				filtered = append(filtered, row)
+			}
+		}
+	} else {
+		filtered = rows
+	}
+	if len(query.Sorts) == 0 {
+		return filtered
+	}
+	n := len(filtered)
+	if n <= 1 {
+		return filtered
+	}
+	idxs := make([]int, n)
+	for i := range idxs {
+		idxs[i] = i
+	}
+	if len(query.Sorts) == 1 {
+		s0 := query.Sorts[0]
+		keys := make([]string, n)
+		for i, row := range filtered {
+			keys[i] = row.Cells[s0.ColID]
+		}
+		dir := 1
+		if s0.Dir == GridSortDesc {
+			dir = -1
+		}
+		slices.SortFunc(idxs, func(a, b int) int {
+			ka, kb := keys[a], keys[b]
+			if ka == kb {
+				return cmp.Compare(a, b)
+			}
+			return dir * cmp.Compare(ka, kb)
+		})
+	} else {
+		sorts := query.Sorts
+		keyCols := make([][]string, len(sorts))
+		for si, s := range sorts {
+			col := make([]string, n)
+			for i, row := range filtered {
+				col[i] = row.Cells[s.ColID]
+			}
+			keyCols[si] = col
+		}
+		slices.SortFunc(idxs, func(a, b int) int {
+			for si, s := range sorts {
+				ka := keyCols[si][a]
+				kb := keyCols[si][b]
+				if c := cmp.Compare(ka, kb); c != 0 {
+					if s.Dir != gridSortAsc {
+						return -c
+					}
+					return c
+				}
+			}
+			return cmp.Compare(a, b)
+		})
+	}
+	result := make([]GridRow, n)
+	for i, idx := range idxs {
+		result[i] = filtered[idx]
+	}
+	return result
+}
+
+type gridFilterLowered struct {
+	colID string
+	op    string
+	value string
+}
+
+func dataGridSourceRowMatchesQuery(
+	row GridRow, needle string, filters []gridFilterLowered,
+) bool {
+	if needle != "" {
+		matched := false
+		for _, value := range row.Cells {
+			if gridContainsLower(value, needle) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for _, f := range filters {
+		cell := row.Cells[f.colID]
+		var matched bool
+		switch f.op {
+		case "equals":
+			matched = gridEqualsLower(cell, f.value)
+		case "starts_with":
+			matched = gridStartsWithLower(cell, f.value)
+		case "ends_with":
+			matched = gridEndsWithLower(cell, f.value)
+		default:
+			matched = gridContainsLower(cell, f.value)
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// gridContainsLower checks haystack.toLower().contains(needle)
+// without allocating. needle must already be lowered.
+func gridContainsLower(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	limit := len(haystack) - len(needle)
+	for i := 0; i <= limit; i++ {
+		found := true
+		for j := range len(needle) {
+			if gg.ASCIILower(haystack[i+j]) != needle[j] {
+				found = false
+				break
+			}
+		}
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// gridEqualsLower checks haystack.toLower() == needle
+// without allocating. needle must already be lowered.
+func gridEqualsLower(haystack, needle string) bool {
+	if len(haystack) != len(needle) {
+		return false
+	}
+	for i := range len(haystack) {
+		if gg.ASCIILower(haystack[i]) != needle[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// gridStartsWithLower checks haystack.toLower().hasPrefix(needle)
+// without allocating. needle must already be lowered.
+func gridStartsWithLower(haystack, needle string) bool {
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i := range len(needle) {
+		if gg.ASCIILower(haystack[i]) != needle[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// gridEndsWithLower checks haystack.toLower().hasSuffix(needle)
+// without allocating. needle must already be lowered.
+func gridEndsWithLower(haystack, needle string) bool {
+	if len(haystack) < len(needle) {
+		return false
+	}
+	off := len(haystack) - len(needle)
+	for i := range len(needle) {
+		if gg.ASCIILower(haystack[i+off]) != needle[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func nonZero(v, fallback int) int {
+	if v > 0 {
+		return v
+	}
+	return fallback
+}
