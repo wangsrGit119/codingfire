@@ -58,6 +58,23 @@ func consoleTitle() string {
 // nothing in the log to say why. A timestamp can expire.
 const consoleOpenTimeout = 3 * time.Second
 
+// Console window geometry, in logical pixels.
+//
+// The width is not a taste decision. The stats tab lays two fixed-width columns
+// side by side, and go-gui has no flex-with-max layout, so the row's intrinsic
+// width is the sum of the two columns' fixed card widths — 1066 px, the same in
+// all four UI languages because it comes from the bar geometry rather than from
+// any text. A window narrower than that gives the tab a horizontal scrollbar,
+// which is exactly what a console that opens on the stats tab must not have;
+// the 1160 leaves ~40 px for the source paths, whose length is data-dependent.
+//
+// Measured, not guessed: `ctprobe layout` renders each tab headlessly at a
+// given window size and reports whether go-gui decided to show either bar.
+const (
+	consoleWindowW = 1160
+	consoleWindowH = 760
+)
+
 // OpenConsole shows the console, or raises the open one and switches tab.
 //
 // tab is one of the ConsoleTab constants. Out-of-range values fall back to the
@@ -100,11 +117,11 @@ func (a *App) OpenConsole(tab int) {
 		State:           &consoleState{App: a, Tab: want},
 		Title:           consoleTitle(),
 		IconPNG:         TrayIconArt.CachedPNG(32),
-		Width:           820,
+		Width:           consoleWindowW,
 		// Tall enough for the stats tab's four sections to fit without
 		// scrolling on a 1080p desktop; the tab content scrolls if the user
 		// shrinks the window below this.
-		Height:    760,
+		Height:    consoleWindowH,
 		MinWidth:  720,
 		MinHeight: 620,
 		OnInit: func(w *gui.Window) {
@@ -1328,9 +1345,14 @@ func aboutTab(s *consoleState) []gui.View {
 		if i == 0 {
 			style = theme.B3
 		}
+		// TextModeWrap is not cosmetic: without it a long sentence keeps its
+		// single-line intrinsic width, and one of these lines is 1730 px in
+		// English — wide enough to give the whole tab a horizontal scrollbar on
+		// any window that fits on a screen.
 		body = append(body, gui.Text(gui.TextCfg{
 			Text:      line,
 			TextStyle: style,
+			Mode:      gui.TextModeWrap,
 			Sizing:    gui.FillFit,
 		}))
 	}
