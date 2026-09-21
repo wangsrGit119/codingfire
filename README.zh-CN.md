@@ -23,6 +23,8 @@
 - **随桌面启动**，不想要就在菜单里关掉。
 - **四种界面语言** —— 英文、简体中文、日本語、한국어，也可以跟随系统。
 - **只读、离线。** 不联网、不上传、无遥测；不读 prompt、代码或文件内容。
+- **占用低。** 火焰隐藏后不再重绘，兜底扫描每 4 秒一次，工作集约 33 MiB。
+  [实测记录](perf-artifacts/memory-optimization-report.md)。
 - **单个静态可执行文件。** 不需要 .NET、不引入 DLL、没有安装过程、不需要管理员权限。
 
 ## 系统要求
@@ -39,12 +41,9 @@
 Windows 7、Windows 8 以及任何 32 位 Windows，请改用
 [C# 版](https://github.com/wangsrGit119/codingfire-win)。
 
-几点平台说明。Linux 的透明窗口依赖合成器 —— 没有合成器会画在不透明矩形上；没有
-StatusNotifier 宿主（GNOME 需要装扩展）就没有菜单可以退出。macOS 发布的是未签名包，
-首次启动会被 Gatekeeper 拦下，需要在「系统设置 › 隐私与安全性」里放行一次；程序常驻
-菜单栏，没有 Dock 图标。**各平台都还没做**逐像素穿透：go-gui 把窗口当成一整块画面，
-所以穿透只能是全有或全无。Windows 是打磨最充分的目标平台，`windows/arm64` 会构建发布
-但从未实机跑过。
+**各平台都还没做**逐像素穿透：go-gui 把窗口当成一整块画面，所以穿透只能是全有或全无。
+Linux 没有合成器会画在不透明矩形上；macOS 是未签名包，首次启动会被 Gatekeeper 拦下，
+需要在「系统设置 › 隐私与安全性」里放行一次。`windows/arm64` 会构建发布但从未实机跑过。
 
 ## 支持的数据源
 
@@ -65,6 +64,20 @@ WorkBuddy 的国内版与国外版是两份独立安装、两个 home 目录，�
 最大总量」取差额，重启不重复计数。**刻意不采集**：Cursor、Kiro、Antigravity、QwenWork、
 Trae，以及若干日志结构未能核实的工具。
 
+## 数据目录
+
+| 系统 | 目录 |
+|---|---|
+| Windows | `%APPDATA%\CodingFire\` |
+| Linux | `$XDG_CONFIG_HOME/CodingFire/`（一般是 `~/.config/CodingFire/`） |
+| macOS | `~/Library/Application Support/CodingFire/` |
+
+这里就是 [C# 版](https://github.com/wangsrGit119/codingfire-win) 用的那个目录，所以两版可以
+随意切换，但同一时刻只能跑一个。设 `CODINGFIRE_DATA_DIR` 可改用便携目录。此目录之外不写
+任何东西 —— 只有开关打开时的那条开机自启项。
+
+`CodingFire --dump 报告.txt` 可把同样的统计导出成纯文本。
+
 ## 从源码构建
 
 需要 **Go 1.26 或更高**。Windows 上不需要 C 编译器；macOS 需要 Xcode 命令行工具，
@@ -76,77 +89,14 @@ CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # macOS
 go vet ./... && go test ./...
 ```
 
-Windows 上 `build.ps1` 把这些包好了（`-Run`、`-Dump`、`-Render`），
-`release.ps1 -Version 1.1.0` 负责打包和打 tag。macOS 上 `CGO_ENABLED=0` 能编过，但一启动
-就 panic：*"no native backend available"* —— go-gui 只在开启 cgo 时才选 Metal 后端，
-所以 macOS 产物是在 macOS runner 上构建的。
-
-版本号只有一处出处：`internal/core/version.go`。发版工作流从源码里读出这个常量，
-与 tag 不一致就拒绝发布。每次 push 都会在三端构建并测试，Linux 那个 job 还会在 Xvfb 下
-真的把程序启动起来 —— X11 窗口层没有任何编译期信号。有一个测试是默认跳过的：悬浮窗
-内存探针，`CODINGFIRE_MEMORY_PROBE=1 go test ./internal/ui -run TestOverlayMemoryProbe`。
+版本号只有一处出处：`internal/core/version.go`。推一个 tag，
+[CI](../../actions/workflows/release.yml) 就会构建、打包并发布全部六个目标 —— 版本号与 tag
+不一致会直接中止，任何一个平台编不过则**在往 release 挂任何东西之前**失败。Windows 那一半
+也可以在本地用 `build.ps1` / `release.ps1` 做。
 
 `third_party/go-gui` 与 `third_party/go-glyph` 是打过补丁的 fork，通过 `go.mod` 的
-`replace` 指向本地目录，**故意提交进仓库**，这样 clone 下来不用联网就能构建。go-gui 的
-补丁修了 Windows 托盘菜单整体错一位，以及在 X11 上补写 `_NET_WM_PID` —— 缺了它就无法把
-自己的窗口和别的客户端区分开。go-glyph 的补丁在关闭控制台时释放字体缓存。
+`replace` 指向本地目录，**故意提交进仓库**，这样 clone 下来不用联网就能构建。
 **上游升级后每一处都要重新检查。**
-
-## 发版
-
-推一个 tag，[`.github/workflows/release.yml`](.github/workflows/release.yml) 会自动构建、
-打包并发布：
-
-```bash
-git tag -a v1.1.0 -m "CodingFire v1.1.0"
-git push origin v1.1.0
-```
-
-如果 `version.go` 声明的版本与 tag 不一致，工作流会直接中止；任何一个平台编不过，
-就**在往 release 挂任何东西之前**失败。目标：`windows`、`linux`、`darwin`，各 amd64 与
-arm64，每个都是一个单文件 zip，且每个都在与自己匹配的 runner 上构建、并核对二进制里
-记录的 `GOOS`/`GOARCH`。`release.ps1` 在本地做 Windows 那一半。
-
-## 数据放在哪
-
-| 系统 | 目录 |
-|---|---|
-| Windows | `%APPDATA%\CodingFire\` |
-| Linux | `$XDG_CONFIG_HOME/CodingFire/`（一般是 `~/.config/CodingFire/`） |
-| macOS | `~/Library/Application Support/CodingFire/` |
-
-这里就是 [C# 版](https://github.com/wangsrGit119/codingfire-win) 用的那个目录，**有意共用**：
-两边文件格式完全一致，所以它们是同一个应用的两种实现 —— 来回切换不丢历史，也不丢设置。
-代价是同一时刻只能跑一个，而这正是想要的：两个进程往同一份库里追加，只会把它写重复。
-
-`usage.ndjson` 是事件库（保留 45 天），`cursors.json` 记录每个文件的读取游标，
-`settings.json` 是你的偏好设置，`codingfire.log` 只在出错时写。设
-`CODINGFIRE_DATA_DIR` 可改用便携数据目录。
-
-唯一写在这个目录之外的是开机自启项，且只在开关打开时才写。它不需要管理员权限，
-关掉自启的瞬间就会被删掉：Windows 是 `HKCU\...\Run` 值，Linux 是 XDG `.desktop` 文件，
-macOS 是 LaunchAgent。这些名字同样和 C# 版共用，所以两者不可能同时占住登录项。
-
-无界面自检：
-
-```bash
-CodingFire --dump 报告.txt     # 纯文本统计报告，固定英文
-CodingFire --render 目录       # 把各档火势渲染成 PNG
-```
-
-## CPU、显卡与内存占用
-
-- 兜底日志扫描每 **4 秒**一次；文件变化通知会提前触发，已有有效游标且内容未变的文件
-  在分配读取缓冲区之前就跳过。
-- 火焰 **10 帧/秒**，余烬 **4 帧/秒**；隐藏后不再重绘。状态计算与鼠标检测保持 20 Hz。
-- Windows 上火焰与悬浮卡片用可复用的 DIB，控制台用软件绘制，正常运行不创建 OpenGL
-  上下文。非 Windows 全部由 go-gui 的 OpenGL 后端绘制，因此需要可用的 GL 驱动 ——
-  Mesa 的 `llvmpipe` 可以，CI 用的就是它。
-- 实测工作集：带火焰约 33 MiB，带悬浮卡片约 34 MiB，关闭控制台后约 37 MiB。详见
-  [对比记录](perf-artifacts/memory-optimization-report.md)。
-
-`CODINGFIRE_OVERLAY_BACKEND=gl` 可在 Windows 上切回旧的 OpenGL 路径；不设置则默认走
-低内存后端。想再省一点就选小尺寸火焰，或从托盘隐藏火焰 —— 两种情况下 token 统计都照常。
 
 ## 致谢
 

@@ -28,6 +28,9 @@ you burn tokens, the bigger the fire.
 - **Four UI languages** - English, 简体中文, 日本語, 한국어 - or follow the system.
 - **Read-only and offline.** No network, no uploads, no telemetry; prompts, code
   and file contents are never read.
+- **Light on resources.** A hidden flame is not redrawn and the fallback scan runs
+  every 4 seconds - about 33 MiB of working set.
+  [Measurements](perf-artifacts/memory-optimization-report.md).
 - **One static binary.** No .NET, no DLLs, no installer, no admin rights.
 
 ## Requirements
@@ -45,14 +48,10 @@ run it - each zip holds exactly one file. With no data yet the fire stays in an
 Windows 7, Windows 8 and 32-bit Windows: use the
 [C# build](https://github.com/wangsrGit119/codingfire-win).
 
-A few platform notes. Linux draws its transparent window through the compositor -
-without one you get an opaque rectangle, and without a StatusNotifier host (GNOME
-needs an extension) there is no menu to quit from. macOS is unsigned, so Gatekeeper
-blocks the first launch until you allow it under System Settings › Privacy &
-Security; the app lives in the menu bar and has no Dock icon. Per-pixel
-click-through is not implemented on any platform: go-gui renders a window as one
-surface, so pass-through is all-or-nothing. Windows is the most exercised target,
-and `windows/arm64` is built but has never been run.
+Per-pixel click-through is not implemented on any platform - go-gui renders a
+window as one surface, so pass-through is all-or-nothing. Linux without a
+compositor draws an opaque rectangle; macOS is unsigned, so Gatekeeper blocks the
+first launch until you allow it. `windows/arm64` is built but has never been run.
 
 ## Data sources
 
@@ -75,6 +74,22 @@ Only billable tokens are counted, cache reads and writes stay separate columns, 
 event id, so restarts never double-count. Deliberately not collected: Cursor, Kiro,
 Antigravity, QwenWork, Trae, and a few tools whose log schema could not be verified.
 
+## Data directory
+
+| OS | Directory |
+|---|---|
+| Windows | `%APPDATA%\CodingFire\` |
+| Linux | `$XDG_CONFIG_HOME/CodingFire/` (usually `~/.config/CodingFire/`) |
+| macOS | `~/Library/Application Support/CodingFire/` |
+
+This is the same directory the
+[C# build](https://github.com/wangsrGit119/codingfire-win) uses, so the two are
+interchangeable and only one of them can run at a time. Set `CODINGFIRE_DATA_DIR`
+for a portable directory instead. Nothing outside it is written, except the startup
+entry while that toggle is on.
+
+`CodingFire --dump report.txt` writes the same statistics as plain text.
+
 ## Build
 
 Requires **Go 1.26 or later**. Windows needs no C compiler; macOS needs Xcode's
@@ -86,92 +101,14 @@ CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # macOS
 go vet ./... && go test ./...
 ```
 
-On Windows, `build.ps1` wraps that up (`-Run`, `-Dump`, `-Render`), and
-`release.ps1 -Version 1.1.0` zips and tags. `CGO_ENABLED=0` on macOS compiles and
-then panics on launch with *"no native backend available"* - go-gui only selects
-its Metal backend under cgo, which is why the macOS artifacts are built on a macOS
-runner.
-
-The version lives in one place, `internal/core/version.go`; the release workflow
-reads it out of the source and refuses to publish if it does not match the tag. CI
-builds and tests all three platforms on every push, and starts the app under Xvfb
-on Linux, where the X11 window layer has no compile-time signature. One test is
-opt-in - the overlay memory probe, `CODINGFIRE_MEMORY_PROBE=1 go test ./internal/ui
--run TestOverlayMemoryProbe`.
+The version lives in one place, `internal/core/version.go`. Pushing a tag makes
+[CI](../../actions/workflows/release.yml) build, package and publish all six targets
+- it aborts if `version.go` does not match the tag, and publishes nothing unless
+every platform built. `build.ps1` and `release.ps1` do the Windows half locally.
 
 `third_party/go-gui` and `third_party/go-glyph` are patched forks wired in with
-`replace` directives, committed on purpose so a clone builds offline. The go-gui
-patches fix a Windows tray menu that shifts every action by one, and publish
-`_NET_WM_PID` on X11, without which a window cannot be told apart from any other
-client's. The go-glyph patch releases its font cache when the console closes.
-**Re-check each after an upstream bump.**
-
-## Releasing
-
-Push a tag and [`.github/workflows/release.yml`](.github/workflows/release.yml)
-builds, packages and publishes it:
-
-```bash
-git tag -a v1.1.0 -m "CodingFire v1.1.0"
-git push origin v1.1.0
-```
-
-It aborts if `version.go` declares a different version, and publishes nothing
-unless every platform built - each on a runner that matches it, each artifact
-checked for the `GOOS`/`GOARCH` recorded inside it. Targets: `windows`, `linux` and
-`darwin`, amd64 and arm64, one zip each. `release.ps1` does the Windows half
-locally.
-
-## Data and privacy
-
-| OS | Directory |
-|---|---|
-| Windows | `%APPDATA%\CodingFire\` |
-| Linux | `$XDG_CONFIG_HOME/CodingFire/` (usually `~/.config/CodingFire/`) |
-| macOS | `~/Library/Application Support/CodingFire/` |
-
-This is the same directory the
-[C# build](https://github.com/wangsrGit119/codingfire-win) uses, on purpose. The
-file formats are identical, so the two are one app with two implementations:
-moving between them keeps your whole history and your settings. It also means
-only one of them can run at a time, which is what you want - two processes
-appending to one store would just duplicate it.
-
-`usage.ndjson` is the event store (45-day retention), `cursors.json` the per-file
-read offsets, `settings.json` your preferences, and `codingfire.log` errors only.
-Set `CODINGFIRE_DATA_DIR` for a portable data directory instead.
-
-The only thing written outside that folder is the autostart entry, and only while
-the toggle is on. It needs no admin rights and is removed again the moment you turn
-autostart off: an `HKCU\...\Run` value on Windows, an XDG `.desktop` file on Linux,
-a LaunchAgent on macOS. Those names are shared with the C# build as well, so the
-two can never both claim the login slot.
-
-Headless self-checks:
-
-```bash
-CodingFire --dump report.txt   # plain-text statistics report, always in English
-CodingFire --render out-dir    # render each fire tier to PNG
-```
-
-## Resource usage
-
-- The fallback log scan runs every **4 seconds**; file-change notifications trigger
-  it sooner, and unchanged files with a valid cursor are skipped before any read
-  buffer is allocated.
-- The flame runs at **10 fps**, embers at **4 fps**; hidden flames are not redrawn.
-  State and mouse polling stay at 20 Hz.
-- On Windows the flame and hover card use reusable DIBs and the console uses
-  software drawing, so normal operation creates no OpenGL context. Off Windows
-  everything is drawn by go-gui's OpenGL backend, so a GL driver is required -
-  Mesa's `llvmpipe` works, and is what CI uses.
-- Measured working set: about 33 MiB with the flame, 34 MiB with the hover card,
-  37 MiB after closing the console. See
-  [the full comparison](perf-artifacts/memory-optimization-report.md).
-
-`CODINGFIRE_OVERLAY_BACKEND=gl` selects the older OpenGL path on Windows; leave it
-unset for the default lower-memory backend. To cost even less, pick the small flame
-size or hide the flame - token collection continues either way.
+`replace` directives, committed on purpose so a clone builds offline. **Re-check each
+after an upstream bump.**
 
 ## Credits
 
