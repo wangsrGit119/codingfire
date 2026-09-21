@@ -84,7 +84,7 @@ Trae，以及若干日志结构未能核实的工具。
 
 ```bash
 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # Windows、Linux
-CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # macOS
+scripts/macos/build.sh                                              # macOS 应用包（dist/CodingFire.app）
 go vet ./... && go test ./...
 ```
 

@@ -12,7 +12,7 @@ import (
 	"unsafe"
 )
 
-// activateApp sets the NSApplication activation policy to Regular
+// activateApp sets the NSApplication activation policy to Accessory
 // and brings the app to the foreground. Must be called before
 // creating any windows for CLI-launched (non-bundled) binaries.
 func activateApp() {

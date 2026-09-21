@@ -77,8 +77,10 @@ const consoleOpenTimeout = 3 * time.Second
 // at their row caps; heavier data scrolls the tab, which is what a scrollable
 // region is for.
 const (
-	consoleWindowW = 1160
-	consoleWindowH = 820
+	consoleWindowW  = 960
+	consoleWindowH  = 680
+	statsColumnsGap = 6
+	statsColumnW    = (consoleWindowW - 44 - statsColumnsGap) / 2
 )
 
 // OpenConsole shows the console, or raises the open one and switches tab.
@@ -128,8 +130,8 @@ func (a *App) OpenConsole(tab int) {
 		// scrolling on a 1080p desktop; the tab content scrolls if the user
 		// shrinks the window below this.
 		Height:    consoleWindowH,
-		MinWidth:  720,
-		MinHeight: 620,
+		MinWidth:  640,
+		MinHeight: 480,
 		OnInit: func(w *gui.Window) {
 			a.mu.Lock()
 			a.console = w
@@ -239,7 +241,7 @@ func consoleView(w *gui.Window) gui.View {
 	return gui.Column(gui.ContainerCfg{
 		ID:      "console.root",
 		Sizing:  gui.FillFill,
-		Padding: gui.PadAll(10),
+		Padding: gui.PadAll(6),
 		Content: []gui.View{
 			gui.TabControl(gui.TabControlCfg{
 				ID:       "console.tabs",
@@ -316,13 +318,13 @@ func statTimelineGradient(dim bool) *gui.GradientDef {
 // fixed-width window, so a fixed track is the honest way to get an accurate
 // bar length.
 const (
-	statCardPad  = 8
-	statCardGap  = 5
-	statLabelW   = 104
-	statBarW     = 224
-	statValueW   = 112
-	statPercentW = 58
-	statNameW    = 146
+	statCardPad  = 6
+	statCardGap  = 3
+	statLabelW   = 78
+	statBarW     = 110
+	statValueW   = 78
+	statPercentW = 46
+	statNameW    = 110
 	// statNameRunes is the character budget that fits statNameW at the 12 px
 	// the name cells use; names longer than this are truncated so they cannot
 	// widen the card.
@@ -346,43 +348,48 @@ func statsTab(s *consoleState) []gui.View {
 	rolling := rollingUsage(a)
 
 	left := []gui.View{
-		statsSectionHeader(core.T("stats.overview"), theme),
-		statsCard(rollingSummaryRows(rolling)),
 		statsSectionHeader(core.T("stats.last7"), theme),
-		statsCard(rollingDailyRows(rolling)),
+		statsColumnCard(rollingDailyRows(rolling)),
 		statsSectionHeader(core.T("stats.timeline"), theme),
 		todayTimeline(hourly),
 	}
 	right := []gui.View{
 		statsSectionHeader(core.T("stats.breakdown"), theme),
-		statsCard(breakdownRows(breakdown, total)),
+		statsColumnCard(breakdownRows(breakdown, total)),
 	}
+	usedApps := sourceBars(bySource)
+	if len(usedApps) == 0 {
+		usedApps = []gui.View{gui.Text(gui.TextCfg{
+			Text: core.T("hover.none"), TextStyle: statStyle(12, statFaint, false),
+			Mode: gui.TextModeWrap, Sizing: gui.FillFit,
+		})}
+	}
+	right = append(right,
+		statsSectionHeader(core.T("stats.usedApps"), theme),
+		statsColumnCard(usedApps),
+	)
 
 	// Only shown when something actually named a model: an empty card here
 	// would imply the tools report one and simply had nothing to say.
 	if byModel := a.Monitor.TodayByModel(); len(byModel) > 0 {
 		right = append(right,
 			statsSectionHeader(core.T("stats.byModel"), theme),
-			statsCard(modelBars(byModel)),
+			statsColumnCard(modelBars(byModel)),
 		)
 	}
 
 	// The per-source and timeline sections are hidden rather than shown empty:
 	// a list of zero-length bars says nothing that the empty-state line below
 	// does not say better.
-	if len(bySource) > 0 {
-		right = append(right,
-			statsSectionHeader(core.T("stats.bySource"), theme),
-			statsCard(sourceBars(bySource)),
-		)
-	}
+	// The used-apps section above is always present so the primary breakdown
+	// does not disappear when today's source totals are temporarily empty.
 
 	// Keep the raw event trail visible below the aggregates. This makes the
 	// numbers auditable without exposing prompts or source file contents.
 	if recent := recentEventRows(a); len(recent) > 0 {
 		right = append(right,
 			statsSectionHeader(core.T("stats.recent"), theme),
-			statsCard(recent),
+			statsColumnCard(recent),
 		)
 	}
 
@@ -390,13 +397,25 @@ func statsTab(s *consoleState) []gui.View {
 		left = append(left, muted(core.T("hover.none"), theme))
 	}
 	out := []gui.View{
-		statsHeadCard(a, total, theme),
 		gui.Row(gui.ContainerCfg{
-			ID: "console.stats.columns", Sizing: gui.FillFill, Spacing: gui.SomeF(8),
+			ID:      "console.stats.firstrow",
+			Sizing:  gui.FixedFit,
+			Width:   consoleWindowW - 44,
+			Spacing: gui.SomeF(statsColumnsGap),
+			HAlign:  gui.HAlignStart,
+			VAlign:  gui.VAlignTop,
+			Content: []gui.View{
+				statsHeadCard(a, total, theme),
+				statsColumnCard(rollingSummaryRows(rolling)),
+			},
+		}),
+		gui.Row(gui.ContainerCfg{
+			ID: "console.stats.columns", Sizing: gui.FixedFit, Width: consoleWindowW - 44, Spacing: gui.SomeF(statsColumnsGap),
+			HAlign: gui.HAlignStart,
 			VAlign: gui.VAlignTop,
 			Content: []gui.View{
-				gui.Column(gui.ContainerCfg{ID: "console.stats.left", Sizing: gui.FillFill, Spacing: gui.SomeF(4), Content: left}),
-				gui.Column(gui.ContainerCfg{ID: "console.stats.right", Sizing: gui.FillFill, Spacing: gui.SomeF(4), Content: right}),
+				gui.Column(gui.ContainerCfg{ID: "console.stats.left", Sizing: gui.FixedFit, Width: statsColumnW, HAlign: gui.HAlignLeft, Spacing: gui.SomeF(3), Content: left}),
+				gui.Column(gui.ContainerCfg{ID: "console.stats.right", Sizing: gui.FixedFit, Width: statsColumnW, HAlign: gui.HAlignLeft, Spacing: gui.SomeF(3), Content: right}),
 			},
 		}),
 	}
@@ -405,12 +424,13 @@ func statsTab(s *consoleState) []gui.View {
 		gui.Column(gui.ContainerCfg{
 			ID:         "console.stats.scroll",
 			Sizing:     gui.FillFill,
+			HAlign:     gui.HAlignLeft,
 			Scrollable: true,
 			ScrollbarCfgY: &gui.ScrollbarCfg{
 				Overflow: gui.ScrollbarAuto,
 			},
-			Spacing: gui.SomeF(4),
-			Padding: gui.PadAll(2),
+			Spacing: gui.SomeF(3),
+			Padding: gui.NoPadding,
 			Content: out,
 		}),
 	}
@@ -418,9 +438,9 @@ func statsTab(s *consoleState) []gui.View {
 
 func todayTimeline(hourly []core.HourlyUsage) gui.View {
 	if hourMax(hourly) > 0 {
-		return statsCard(hourlyChart(hourly))
+		return statsColumnCard(hourlyChart(hourly))
 	}
-	return statsCard([]gui.View{gui.Text(gui.TextCfg{
+	return statsColumnCard([]gui.View{gui.Text(gui.TextCfg{
 		Text: core.T("hover.none"), TextStyle: statStyle(12, statFaint, false),
 		Mode: gui.TextModeWrap, Sizing: gui.FillFit,
 	})})
@@ -431,7 +451,7 @@ func todayTimeline(hourly []core.HourlyUsage) gui.View {
 func statsSectionHeader(text string, theme gui.Theme) gui.View {
 	return gui.Row(gui.ContainerCfg{
 		Sizing:  gui.FillFit,
-		Padding: gui.NewPadding(0, statCardPad, 0, statCardPad),
+		Padding: gui.NoPadding,
 		Content: []gui.View{gui.Text(gui.TextCfg{Text: text, TextStyle: theme.B3})},
 	})
 }
@@ -639,7 +659,7 @@ func statsHeadCard(a *App, total int, theme gui.Theme) gui.View {
 		},
 	})
 
-	return statsCard([]gui.View{
+	return statsCardWidth([]gui.View{
 		gui.Row(gui.ContainerCfg{
 			ID:      "console.stats.headrow",
 			Sizing:  gui.FillFit,
@@ -647,7 +667,7 @@ func statsHeadCard(a *App, total int, theme gui.Theme) gui.View {
 			Padding: gui.NoPadding,
 			Content: []gui.View{headline, details},
 		}),
-	})
+	}, statsColumnW)
 }
 
 // statLine is a caption/value pair inside a card. The caption column is fixed so
@@ -1034,9 +1054,18 @@ func hourTokens(hours []core.HourlyUsage, hour int) int {
 // statsCard wraps content in the warm dark glass panel the console's own stats
 // views use, so they read as CodingFire's HUD rather than as theme chrome.
 func statsCard(content []gui.View) gui.View {
+	return statsCardWidth(content, 0)
+}
+
+func statsCardWidth(content []gui.View, width int) gui.View {
+	sizing := gui.FillFit
+	if width > 0 {
+		sizing = gui.FixedFit
+	}
 	return gui.Column(gui.ContainerCfg{
 		ID:          "console.stats.card",
-		Sizing:      gui.FillFit,
+		Sizing:      sizing,
+		Width:       float32(width),
 		Padding:     gui.PadAll(statCardPad),
 		Spacing:     gui.SomeF(statCardGap),
 		Radius:      gui.SomeF(hoverCardRadius),
@@ -1045,6 +1074,13 @@ func statsCard(content []gui.View) gui.View {
 		SizeBorder:  gui.SomeF(1),
 		Content:     content,
 	})
+}
+
+// statsColumnCard gives cards in the two-column grid the same outer width as
+// their column. Without an explicit width, go-gui sizes the card to its
+// intrinsic content and centers it inside the fixed-width column.
+func statsColumnCard(content []gui.View) gui.View {
+	return statsCardWidth(content, statsColumnW)
 }
 
 // derefInt reads an optional token count; nil means the source did not report

@@ -91,9 +91,8 @@ func UseImage(key string, w, h int, pix []byte) string {
 }
 
 // UpdateImage copies a frame into a reusable buffer under a stable key. The GL
-// backend refreshes the existing texture with TexSubImage2D; the software
-// backend reads the current buffer directly. Other GPU backends do not support
-// dynamic images. Use a dedicated key, and call on the GUI thread before
+// and Metal backends refresh the existing texture in place; the software
+// backend reads the current buffer directly. Use a dedicated key, and call on the GUI thread before
 // drawing (for example in a view generator), never concurrently with rendering.
 // Unlike UseImage, the caller retains ownership of pix and may reuse it.
 func UpdateImage(key string, w, h int, pix []byte) string {

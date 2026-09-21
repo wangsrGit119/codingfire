@@ -103,6 +103,7 @@ var Table = map[string][4]string{
 
 	"stats.today":         {"Today total", "今日总量", "本日の合計", "오늘 합계"},
 	"stats.bySource":      {"By source", "分来源", "データ源別", "소스별"},
+	"stats.usedApps":      {"Used applications", "使用的应用", "使用したアプリ", "사용한 앱"},
 	"stats.byModel":       {"By model", "分模型", "モデル別", "모델별"},
 	"stats.breakdown":     {"Breakdown", "用量构成", "内訳", "구성"},
 	"stats.timeline":      {"Today timeline", "今日时间线", "本日のタイムライン", "오늘 타임라인"},

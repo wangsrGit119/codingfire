@@ -6,6 +6,22 @@ package ui
 #cgo CFLAGS: -fobjc-arc
 #cgo LDFLAGS: -framework AppKit -framework Foundation
 
+// ld warns "ignoring duplicate libraries: '-lobjc'" on every macOS link. It is
+// harmless: cgo appends -lobjc for each package that compiles Objective-C, and
+// both this package (cocoa_darwin.m) and go-gui's metal backend do, so the flag
+// reaches the linker twice and ld simply uses it once.
+//
+// It cannot be silenced from here. The flag that does it is
+// -Wl,-no_warn_duplicate_libraries, and Go refuses it in a #cgo directive with
+// "invalid flag in #cgo LDFLAGS": the cgo allowlist only permits
+// -Wl,--no-warn-<x>, while ld only accepts the single-dash, underscore spelling
+// and rejects the double-dash form outright ("unknown options"). The two are
+// mutually exclusive, which is why upstream go-gui sets it through the
+// CGO_LDFLAGS environment variable instead - an env var is trusted, a #cgo
+// directive is not. scripts/macos/build.sh sets the same variable, so the
+// scripted build is quiet; a bare `go run .` will still print the warning, and
+// that is not fixable.
+
 #include <stdlib.h>
 #include "cocoa_darwin.h"
 */

@@ -96,7 +96,7 @@ command line tools, because the Metal backend is cgo.
 
 ```bash
 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # Windows, Linux
-CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # macOS
+scripts/macos/build.sh                                              # macOS app bundle (dist/CodingFire.app)
 go vet ./... && go test ./...
 ```
 

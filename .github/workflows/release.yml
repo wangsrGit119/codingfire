@@ -287,15 +287,28 @@ jobs:
           GOOS: darwin
           GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p dist
-          go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
-          ls -l dist/CodingFire
+          mkdir -p dist/CodingFire.app/Contents/MacOS
+          go build -trimpath -ldflags '-s -w' -o dist/CodingFire.app/Contents/MacOS/CodingFire .
+          cat > dist/CodingFire.app/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleDisplayName</key><string>CodingFire</string>
+            <key>CFBundleExecutable</key><string>CodingFire</string>
+            <key>CFBundleIdentifier</key><string>com.codingfire.app</string>
+            <key>CFBundleName</key><string>CodingFire</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${{ needs.verify.outputs.version }}</string>
+            <key>LSUIElement</key><true/>
+          </dict></plist>
+          PLIST
+          ls -l dist/CodingFire.app/Contents/MacOS/CodingFire
 
       # --dump is headless, so unlike the GUI it can be run on the runner. It
       # proves the binary is not merely well-formed but starts and does its job.
       - name: Run the headless report
         run: |
-          ./dist/CodingFire --dump "$RUNNER_TEMP/dump.txt"
+          ./dist/CodingFire.app/Contents/MacOS/CodingFire --dump "$RUNNER_TEMP/dump.txt"
           head -3 "$RUNNER_TEMP/dump.txt"
           ver='${{ needs.verify.outputs.version }}'
           if ! head -1 "$RUNNER_TEMP/dump.txt" | grep -qF "$ver"; then
@@ -307,14 +320,14 @@ jobs:
           ver='${{ needs.verify.outputs.version }}'
           goos='darwin'
           goarch='${{ matrix.goarch }}'
-          go version -m dist/CodingFire
-          if ! go version -m dist/CodingFire | grep -q "GOOS=$goos"; then
+          go version -m dist/CodingFire.app/Contents/MacOS/CodingFire
+          if ! go version -m dist/CodingFire.app/Contents/MacOS/CodingFire | grep -q "GOOS=$goos"; then
             echo "the binary was not built for $goos" >&2; exit 1
           fi
-          if ! go version -m dist/CodingFire | grep -q "GOARCH=$goarch"; then
+          if ! go version -m dist/CodingFire.app/Contents/MacOS/CodingFire | grep -q "GOARCH=$goarch"; then
             echo "the binary was not built for $goarch" >&2; exit 1
           fi
-          if ! grep -aqF "CodingFire $ver" dist/CodingFire; then
+          if ! grep -aqF "CodingFire $ver" dist/CodingFire.app/Contents/MacOS/CodingFire; then
             echo "the binary does not contain 'CodingFire $ver'" >&2; exit 1
           fi
           echo "ok: $goos/$goarch, reports $ver"
@@ -324,7 +337,7 @@ jobs:
           ver='${{ needs.verify.outputs.version }}'
           asset='${{ matrix.asset }}'
           zip="$asset-v$ver.zip"
-          zip -q "$zip" dist/CodingFire
+          zip -q -r "$zip" dist/CodingFire.app
           ls -l "$zip"
 
       - name: Upload artifact

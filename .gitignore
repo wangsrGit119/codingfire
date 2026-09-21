@@ -18,3 +18,4 @@ report.txt
 _*.ps1
 _*.txt
 /_wfcheck/
+.DS_Store

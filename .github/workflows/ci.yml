@@ -178,15 +178,27 @@ jobs:
           GOOS: darwin
           GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p dist
-          go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
-          ls -l dist/CodingFire
+          mkdir -p dist/CodingFire.app/Contents/MacOS
+          go build -trimpath -ldflags '-s -w' -o dist/CodingFire.app/Contents/MacOS/CodingFire .
+          cat > dist/CodingFire.app/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleDisplayName</key><string>CodingFire</string>
+            <key>CFBundleExecutable</key><string>CodingFire</string>
+            <key>CFBundleIdentifier</key><string>com.codingfire.app</string>
+            <key>CFBundleName</key><string>CodingFire</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSUIElement</key><true/>
+          </dict></plist>
+          PLIST
+          ls -l dist/CodingFire.app/Contents/MacOS/CodingFire
 
       # --dump is headless, so unlike the GUI it can be run here. It proves the
       # binary starts and reaches the data layer, which a build alone does not.
       - name: Run the headless report
         run: |
-          ./dist/CodingFire --dump "$RUNNER_TEMP/dump.txt"
+          ./dist/CodingFire.app/Contents/MacOS/CodingFire --dump "$RUNNER_TEMP/dump.txt"
           head -3 "$RUNNER_TEMP/dump.txt"
           if ! head -1 "$RUNNER_TEMP/dump.txt" | grep -q '^CodingFire '; then
             echo "the report has no header line" >&2; exit 1

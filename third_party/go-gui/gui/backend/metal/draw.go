@@ -320,6 +320,21 @@ func (b *windowState) drawImage(r *gui.RenderCmd) {
 func (b *windowState) resolveImageTexture(
 	res string,
 ) (metalTexture, bool) {
+	// UpdateImage is used for animation frames. Metal textures are otherwise
+	// cached by resource name, so without this branch the first (often fully
+	// transparent) frame remains on screen forever. Keep the texture object
+	// when dimensions are stable and replace its pixels in place.
+	if iw, ih, pix, ok := gui.LookupDynamicImage(res); ok {
+		tex, hit := b.textures.Get(res)
+		if !hit || tex.w != int32(iw) || tex.h != int32(ih) {
+			tex = createMetalTexture(b.ctx, int32(iw), int32(ih), pix)
+			b.textures.Set(res, tex)
+		} else if tex.id != 0 && len(pix) > 0 {
+			C.metalUpdateTexture(b.ctx, C.int(tex.id), 0, 0,
+				C.int(iw), C.int(ih), unsafe.Pointer(&pix[0]))
+		}
+		return tex, true
+	}
 	if iw, ih, pix, ok := gui.LookupImage(res); ok {
 		tex, hit := b.textures.Get(res)
 		if !hit {

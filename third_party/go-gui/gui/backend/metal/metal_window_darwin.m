@@ -1502,7 +1502,11 @@ void metalAppInit(void) {
     }];
 
     [GUIApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    // CodingFire is a menu-bar/desktop overlay app. Accessory keeps its
+    // windows and menu bar active without creating a Dock tile or Cmd-Tab
+    // application entry; the bundle's LSUIElement provides the same intent
+    // when launched by Finder.
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
     NSString *appName = [[NSProcessInfo processInfo] processName];
     if (!appName || [appName length] == 0) {

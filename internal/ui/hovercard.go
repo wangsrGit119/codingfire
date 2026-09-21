@@ -49,6 +49,10 @@ const (
 	hoverCardBigGap  = 10
 	hoverCardRowsGap = 6
 	hoverCardFooterH = 15
+	// Text glyphs have a little descent beyond their nominal line box. Keep a
+	// small bottom reserve so the last source row and the updated footer remain
+	// visible on every backend, including macOS CoreText.
+	hoverCardBottomSafeH = 8
 	// The root's 1 px border sits inside its padding, so it costs a pixel at
 	// each end of the card.
 	hoverCardBorder = 1
@@ -95,10 +99,14 @@ func hoverCardHeight(model HoverModel) float32 {
 	if hoverChartVisible(model) {
 		box += hoverChartBlockH
 	}
-	if len(model.Rows) == 0 {
-		return box + hoverCardRowH*2 + hoverCardFooterH
+	footer := float32(0)
+	if model.HasUpdated {
+		footer = hoverCardFooterH
 	}
-	return box + float32(len(model.Rows))*hoverCardRowH + hoverCardRowsGap + hoverCardFooterH
+	if len(model.Rows) == 0 {
+		return box + hoverCardRowH*2 + footer + hoverCardBottomSafeH
+	}
+	return box + float32(len(model.Rows))*hoverCardRowH + hoverCardRowsGap + footer + hoverCardBottomSafeH
 }
 
 // hoverChartBlockH is everything the mini timeline costs: the plot, its hour
@@ -275,6 +283,7 @@ func HoverCardView(model HoverModel) []gui.View {
 			})},
 		}))
 	}
+	body = append(body, hoverSpacer(hoverCardBottomSafeH))
 
 	return []gui.View{
 		gui.Column(gui.ContainerCfg{

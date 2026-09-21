@@ -196,11 +196,6 @@ func (r *CampfireRenderer) composeFrame(snap core.FireSnapshot, px float64, redu
 	logY := int(math.Round(float64(originY) - logH/2))
 	r.blitSprite(logX, logY, int(math.Round(logW)), int(math.Round(logH)), r.logArt, 1.0)
 
-	// ---- outer glow (soft radial warm additive, under the flame) ----
-	if r.flameAlpha > 0.01 {
-		r.renderFireGlow(snap, px, timeSeconds, float64(originX), float64(originY), flameBaseY, flameH)
-	}
-
 	// ---- flame ----
 	if r.flameAlpha > 0.01 {
 		flameX := int(math.Round(float64(originX) - flameW/2 + jitter))
@@ -210,9 +205,6 @@ func (r *CampfireRenderer) composeFrame(snap core.FireSnapshot, px float64, redu
 		r.FlameBaseY = int(math.Round(float64(originY) - (flameBaseY - px)))
 		r.FlameTipY = flameY
 	}
-
-	// ---- ember breathing glow on top of the logs ----
-	r.renderEmberGlow(logX, logY, int(math.Round(logW)), int(math.Round(logH)), snap, timeSeconds)
 
 	// ---- sparks ----
 	r.renderSparks(snap, px, reduceMotion, timeSeconds, float64(originX), float64(originY), flameBaseY)
@@ -321,100 +313,6 @@ func tierSeed(t core.FireTier) float64 {
 	default:
 		return 5
 	}
-}
-
-// renderFireGlow draws the outer radial glow around the fire, additively,
-// before the flame itself.
-func (r *CampfireRenderer) renderFireGlow(snap core.FireSnapshot, px, timeSeconds, originX, originY, flameBaseY, flameH float64) {
-	// Glow centre: at the base of the flame, slightly above the logs.
-	cx := originX
-	cy := originY - flameBaseY
-
-	baseRadius := flameH*0.55 + 4*px
-	intensityBoost := 1.0 + snap.Intensity*0.2
-	pulse := 0.9 + 0.1*math.Sin(timeSeconds*1.3)
-	maxR := baseRadius * intensityBoost * pulse
-
-	ar, ag, ab := accentComponents(snap)
-
-	// Sharp Gaussian falloff: concentrated near the centre.
-	maxRadiusI := int(math.Ceil(maxR))
-	maxR2 := maxR * maxR
-	for dy := -maxRadiusI; dy <= maxRadiusI; dy++ {
-		for dx := -maxRadiusI; dx <= maxRadiusI; dx++ {
-			dist2 := float64(dx*dx + dy*dy)
-			if dist2 > maxR2 {
-				continue
-			}
-			falloff := math.Exp(-dist2 / maxR2 * 5.0)
-
-			// Keep the same compact Gaussian shape as the C# renderer, but
-			// lift the alpha slightly for the straight-alpha NRGBA surface.
-			// The old 0.06/0.06 values were tuned for C#'s premultiplied
-			// bitmap and became almost invisible after go-gui composited the
-			// transparent GL surface over the desktop.
-			glowAlpha := falloff * (0.09 + snap.Intensity*0.09) * r.flameAlpha
-
-			tx := int(math.Round(cx + float64(dx)))
-			ty := int(math.Round(cy + float64(dy)))
-			if tx < 0 || tx >= r.width || ty < 0 || ty >= r.height {
-				continue
-			}
-			r.addPixel(tx, ty, ar, ag, ab, glowAlpha)
-		}
-	}
-}
-
-// renderEmberGlow draws a pulsing glow over the log pile, additively.
-func (r *CampfireRenderer) renderEmberGlow(logX, logY, logW, logH int, snap core.FireSnapshot, timeSeconds float64) {
-	var heat float64
-	switch snap.Phase {
-	case core.PhaseFlame:
-		heat = math.Max(snap.Intensity, snap.SparkBurst*0.5)
-	case core.PhaseEmber:
-		heat = snap.EmberHeat
-	}
-	if heat < 0.05 {
-		return
-	}
-
-	pulse := 0.8 + 0.2*math.Sin(timeSeconds*2.1)
-	glowStrength := heat * pulse * 0.15
-
-	cx := float64(logX) + float64(logW)*0.5
-	cy := float64(logY) + float64(logH)*0.8
-	radius := float64(logW) * 0.35
-
-	ar, ag, ab := accentComponents(snap)
-
-	rI := int(math.Ceil(radius))
-	r2 := radius * radius
-	for dy := -rI; dy <= rI; dy++ {
-		for dx := -rI; dx <= rI; dx++ {
-			d2 := float64(dx*dx + dy*dy)
-			if d2 > r2 {
-				continue
-			}
-			falloff := math.Exp(-d2 / r2 * 1.8)
-			a := falloff * glowStrength
-			if a < 0.02 {
-				continue
-			}
-			tx := int(math.Round(cx + float64(dx)))
-			ty := int(math.Round(cy + float64(dy)))
-			if tx < 0 || tx >= r.width || ty < 0 || ty >= r.height {
-				continue
-			}
-			r.addPixel(tx, ty, ar, ag, ab, a)
-		}
-	}
-}
-
-func accentComponents(snap core.FireSnapshot) (float64, float64, float64) {
-	if snap.FlameAccent == (core.AccentRGB{}) {
-		return 0.95, 0.55, 0.20
-	}
-	return snap.FlameAccent[0], snap.FlameAccent[1], snap.FlameAccent[2]
 }
 
 // blitEngine scales the heat-field buffer into the panel with nearest-neighbour
@@ -526,46 +424,6 @@ func (r *CampfireRenderer) blendPixel(x, y int, sr, sg, sb, sa float64) {
 	r.pix[o] = toByte255((sr*sa + dr*da*(1-sa)) / outA)
 	r.pix[o+1] = toByte255((sg*sa + dg*da*(1-sa)) / outA)
 	r.pix[o+2] = toByte255((sb*sa + db*da*(1-sa)) / outA)
-	r.pix[o+3] = toByte255(outA)
-}
-
-// addPixel adds a colour into the frame, matching the C# renderer's additive
-// blend on its premultiplied BGRA bitmap.
-//
-// The Go frame is straight-alpha NRGBA, though. The old port copied the C#
-// channel addition directly into straight RGB, leaving glow pixels with dark
-// RGB values such as (38,22,8,42). When go-gui (or --render) composited that
-// pixel, the alpha was applied a second time and the ambient halo nearly
-// disappeared. Convert the destination to premultiplied form, add the glow,
-// then convert back to straight alpha exactly once.
-func (r *CampfireRenderer) addPixel(x, y int, cr, cg, cb, a float64) {
-	if a <= 0 {
-		return
-	}
-	if a > 1 {
-		a = 1
-	}
-	o := (y*r.width + x) * 4
-
-	da := float64(r.pix[o+3]) / 255
-	sa := a
-	outA := da + sa
-	if outA > 1 {
-		outA = 1
-	}
-	if outA <= 0 {
-		return
-	}
-
-	// Existing straight-alpha destination -> premultiplied channels, then
-	// additive source contribution. Clamp premultiplied values before the
-	// unpremultiply so an intense glow cannot wrap or produce invalid RGB.
-	pr := math.Min(1, float64(r.pix[o])/255*da+cr*sa)
-	pg := math.Min(1, float64(r.pix[o+1])/255*da+cg*sa)
-	pb := math.Min(1, float64(r.pix[o+2])/255*da+cb*sa)
-	r.pix[o] = toByte255(pr / outA)
-	r.pix[o+1] = toByte255(pg / outA)
-	r.pix[o+2] = toByte255(pb / outA)
 	r.pix[o+3] = toByte255(outA)
 }
 

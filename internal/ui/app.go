@@ -212,10 +212,14 @@ func (a *App) Run() {
 			// as soon as OnInit returns, X11 has already mapped it — so doing
 			// both in one pass is what keeps it from ever being seen at
 			// go-gui's default (0,0).
+			probeLog("oninit pre-tweaks  tokens=%d phase=%v intensity=%.4f",
+				a.Fire.TodayTokens, a.Fire.Snapshot().Phase, a.Fire.Snapshot().Intensity)
 			a.applyPlatformTweaks()
 			if a.Settings.FlameVisible && !a.probeHidden {
 				SetWindowVisible(a.hwnd, true)
 			}
+			probeLog("oninit post-visible tokens=%d phase=%v intensity=%.4f",
+				a.Fire.TodayTokens, a.Fire.Snapshot().Phase, a.Fire.Snapshot().Intensity)
 
 			// If the saved state says hidden, take the native window down
 			// again. It stays alive so the tray's Show action can bring it
@@ -235,6 +239,8 @@ func (a *App) Run() {
 				fn()
 			})
 			a.Monitor.Start()
+			probeLog("oninit post-start   tokens=%d phase=%v intensity=%.4f",
+				a.Fire.TodayTokens, a.Fire.Snapshot().Phase, a.Fire.Snapshot().Intensity)
 		},
 	}
 	if a.bitmapOverlays {
@@ -346,6 +352,15 @@ func (a *App) flameView(w *gui.Window) gui.View {
 		return gui.Column(gui.ContainerCfg{Sizing: gui.FillFill, SizeBorder: gui.NoBorder})
 	}
 	a.renderFlame()
+
+	probeFlameCalls++
+	psnap := a.Fire.Snapshot()
+	probeLog("flameView #%d phase=%v intensity=%.4f tier=%v ember=%.4f",
+		probeFlameCalls, psnap.Phase, psnap.Intensity, psnap.Tier, psnap.EmberHeat)
+	if probeFlameCalls <= 4 || (probeFlameCalls >= 200 && probeFlameCalls <= 300 && probeFlameCalls%20 == 0) {
+		probeDumpBuffer(fmt.Sprintf("/tmp/cf-seq-%03d.png", probeFlameCalls),
+			a.panelPhysW, a.panelPhysH, a.Renderer.Pix())
+	}
 
 	a.mu.Lock()
 	pw, ph := a.panelPhysW, a.panelPhysH
@@ -1369,8 +1384,35 @@ func (a *App) BuildHoverModel() HoverModel {
 			model.HasUpdated = true
 		}
 	}
+	// A source can have today's data loaded from the store before the first
+	// incremental scan touches it, so its status has no LastReadAt yet. The
+	// latest event still gives the card a useful update time in that case.
+	if last, ok := a.Monitor.LastEvent(); ok && !model.HasUpdated {
+		model.UpdatedAt = last.Timestamp
+		model.HasUpdated = !last.Timestamp.IsZero()
+	}
+	if !model.HasUpdated && a.Store != nil {
+		if last, ok := a.Store.LatestEvent(); ok {
+			model.UpdatedAt = last.Timestamp
+			model.HasUpdated = !last.Timestamp.IsZero()
+		}
+	}
 
 	bySource := a.Monitor.TodayBySource()
+	if a.Store != nil {
+		totals := a.Store.TodayTotals(time.Now())
+		if len(bySource) == 0 {
+			bySource = totals.BySource
+		}
+		for src, tokens := range totals.BySource {
+			if tokens > bySource[src] {
+				bySource[src] = tokens
+			}
+		}
+		if totals.Total > model.TodayTokens {
+			model.TodayTokens = totals.Total
+		}
+	}
 	for _, src := range core.UsageSourcesAll {
 		tokens := bySource[src]
 		if tokens <= 0 {

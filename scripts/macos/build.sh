@@ -2,7 +2,8 @@
 #
 # build.sh - CodingFire for macOS
 #
-# Builds dist/CodingFire with the Go toolchain, the same shape as its sibling
+# Builds dist/CodingFire.app with the Go toolchain, the same shape as a native
+# menu-bar app rather than a bare command-line executable.
 # scripts/windows/build.ps1: vet first, then build with pinned flags, then
 # report the version the source claims.
 #
@@ -21,7 +22,7 @@
 # Usage (run from the repo root, or anywhere - the repo root is resolved from
 # this file's path, not from the caller's working directory):
 #
-#   scripts/macos/build.sh               build -> dist/CodingFire
+#   scripts/macos/build.sh               build -> dist/CodingFire.app
 #   scripts/macos/build.sh --run         build, then launch the tray app
 #   scripts/macos/build.sh --dump FILE   build, then write the local-usage report
 #   scripts/macos/build.sh --render DIR  build, then write the pixel-art previews
@@ -83,7 +84,8 @@ done
 # ---------------------------------------------------------------------------
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 dist="$root/dist"
-app="$dist/CodingFire"
+app="$dist/CodingFire.app"
+executable="$app/Contents/MacOS/CodingFire"
 ldflags='-s -w'
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,22 @@ echo "vetting  : ./..."
 #
 # There is no macOS equivalent of -H=windowsgui: the binary is a plain Mach-O
 # and macOS decides how to treat it from the bundle, which this app does not use.
+#
+# Silence ld's "ignoring duplicate libraries: '-lobjc'". That warning is noise:
+# cgo appends -lobjc for every package that compiles Objective-C, and both this
+# repo (cocoa_darwin.m) and go-gui's metal backend do, so the flag reaches the
+# linker twice and ld uses it once.
+#
+# It has to go through the environment. A #cgo LDFLAGS directive is rejected with
+# "invalid flag in #cgo LDFLAGS", because the cgo allowlist only permits
+# -Wl,--no-warn-<x> while ld only accepts -Wl,-no_warn_duplicate_libraries and
+# rejects the double-dash spelling as "unknown options". The two are mutually
+# exclusive, which is also why upstream go-gui sets this from its Makefile.
+#
+# Appended rather than assigned, so a caller who set CGO_LDFLAGS for their own
+# reasons keeps their flags. Only this script is covered - a bare `go run .` or
+# `go build` still prints the warning, and that cannot be fixed from the source.
+export CGO_LDFLAGS="${CGO_LDFLAGS:-} -Wl,-no_warn_duplicate_libraries"
 # ---------------------------------------------------------------------------
 build_arch() { # arch outfile
     ( cd "$root" && CGO_ENABLED=1 GOARCH="$1" go build -trimpath -ldflags "$ldflags" -o "$2" . )
@@ -146,12 +164,14 @@ mkdir -p "$dist"
 # On macOS the delete always succeeds, even while the app is running: the
 # running process keeps its own copy of the old inode. So a live instance will
 # quietly go on running the previous build, which is worth saying out loud.
-if [[ -f $app ]]; then
+if [[ -e $app ]]; then
     if pgrep -x CodingFire >/dev/null 2>&1; then
         echo "warning  : CodingFire is running - it keeps the old binary until you quit it" >&2
     fi
-    rm -f "$app"
+    rm -rf "$app"
 fi
+
+mkdir -p "$(dirname "$executable")"
 
 host_arch=$(go env GOHOSTARCH)
 
@@ -163,24 +183,49 @@ if [[ $universal == 1 ]]; then
 
     build_arch arm64 "$staging/CodingFire-arm64"
     build_arch amd64 "$staging/CodingFire-x64"
-    lipo -create -output "$app" "$staging/CodingFire-arm64" "$staging/CodingFire-x64"
+    lipo -create -output "$executable" "$staging/CodingFire-arm64" "$staging/CodingFire-x64"
 
     rm -rf "$staging"
     trap - EXIT
 else
     echo "building : CodingFire ($host_arch)"
-    build_arch "$host_arch" "$app"
+    build_arch "$host_arch" "$executable"
 fi
 
-[[ -f "$app" ]] || { echo "BUILD FAILED (no output file)" >&2; exit 1; }
+[[ -f "$executable" ]] || { echo "BUILD FAILED (no output file)" >&2; exit 1; }
 
-size_kb=$(( $(stat -f%z "$app") / 1024 ))
+# A bare Mach-O launched from Finder is handed to Terminal. The app bundle
+# identifies this as a background menu-bar app and keeps the console hidden.
+cat > "$app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>CodingFire</string>
+    <key>CFBundleExecutable</key>
+    <string>CodingFire</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.codingfire.app</string>
+    <key>CFBundleName</key>
+    <string>CodingFire</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+size_kb=$(( $(stat -f%z "$executable") / 1024 ))
 echo "built    : $app (${size_kb} KB)"
 
 if [[ $universal == 1 ]]; then
-    echo "archs    : $(lipo -archs "$app")"
+    echo "archs    : $(lipo -archs "$executable")"
 else
-    echo "arch     : $(file -b "$app" | sed 's/^.*: //')"
+    echo "arch     : $(file -b "$executable" | sed 's/^.*: //')"
 fi
 
 # ---------------------------------------------------------------------------
@@ -217,7 +262,7 @@ if [[ $mode == check ]]; then
 
     # CODINGFIRE_DATA_DIR keeps the run out of the real user's data and gives
     # the report a known path to assert against.
-    CODINGFIRE_DATA_DIR="$workdir/data" "$app" --dump "$workdir/dump.txt"
+    CODINGFIRE_DATA_DIR="$workdir/data" "$executable" --dump "$workdir/dump.txt"
     head -3 "$workdir/dump.txt"
 
     grep -q '^CodingFire ' "$workdir/dump.txt" || {
@@ -250,15 +295,15 @@ esac
 
 case "$mode" in
     dump)
-        "$app" --dump "$target"
+        "$executable" --dump "$target"
         ;;
     render)
-        "$app" --render "$target"
+        "$executable" --render "$target"
         ;;
     run)
-        # Detached on purpose: this is a tray app, and the whole point of
-        # --run is to get it on screen and hand the terminal back.
-        nohup "$app" >/dev/null 2>&1 &
-        echo "launched : pid $!"
+        # Finder launches the bundle as a background menu-bar app, so no
+        # terminal remains attached to the process.
+        open "$app"
+        echo "launched : $app"
         ;;
 esac
