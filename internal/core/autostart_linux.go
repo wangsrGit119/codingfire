@@ -13,13 +13,27 @@ import (
 // of the HKCU Run key, including the property that matters most here — the
 // entry only takes effect at the next login, never for the running session.
 //
-// The file name is deliberately "CodingFireGo.desktop", NOT
-// "CodingFire.desktop", matching the Windows Run value: the two builds are
-// meant to be able to coexist, and a shared name would make them overwrite
-// each other's entry — the last one to run would win the login slot while both
-// still reported autostart as enabled, and turning it off in one would
-// silently disable it for the other.
-const autoStartDesktopFile = "CodingFireGo.desktop"
+// The file name is deliberately "CodingFire.desktop", matching the Windows Run
+// value: the two builds are one app behind one login entry, so enabling
+// autostart in either has to replace the other's Exec line rather than add a
+// second entry that would race for the single-instance mutex at every login.
+const autoStartDesktopFile = "CodingFire.desktop"
+
+// legacyAutoStartDesktopFile is what this build wrote before it adopted the
+// C# build's identity. Left behind, it would start a second copy at login, and
+// turning autostart off would delete only the new file — the campfire would
+// keep appearing while the setting said otherwise.
+const legacyAutoStartDesktopFile = "CodingFireGo.desktop"
+
+// cleanLegacyAutoStart removes the pre-merge .desktop file, if a previous
+// version of this build left one behind. The name is unambiguously ours, so
+// deleting it cannot touch an entry the user created by hand.
+func cleanLegacyAutoStart() {
+	legacy := filepath.Join(configDir(), "autostart", legacyAutoStartDesktopFile)
+	if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+		LogWarn("legacy autostart cleanup failed: " + err.Error())
+	}
+}
 
 // autoStartPath is the .desktop file the desktop environment reads.
 func autoStartPath() string {
@@ -36,10 +50,13 @@ func AutoStartEnabled() bool {
 // AutoStartApply drives the autostart entry to desired.
 //
 // It writes nothing when the entry is already in the target state, so a normal
-// startup never touches the file. A false return means the write failed (a
-// read-only config directory, a full disk) and the caller should roll the
-// setting back.
+// startup never touches the file — the one exception being cleanLegacyAutoStart,
+// which runs once after an upgrade and only deletes. A false return means the
+// write failed (a read-only config directory, a full disk) and the caller
+// should roll the setting back.
 func AutoStartApply(desired bool) bool {
+	cleanLegacyAutoStart()
+
 	path := autoStartPath()
 
 	if desired {

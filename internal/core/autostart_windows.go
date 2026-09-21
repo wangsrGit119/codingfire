@@ -11,13 +11,38 @@ const (
 	// autoStartValueName is fixed rather than derived from the exe name, so
 	// renaming the binary does not strand the old entry.
 	//
-	// Deliberately "CodingFireGo", NOT "CodingFire": the C# build uses the
-	// latter, and a Run value holds exactly one path. Sharing the name would
-	// make the two builds overwrite each other's entry — the last one to run
-	// would win the login slot while both still reported autostart as enabled,
-	// and turning it off in one would silently disable it for the other.
-	autoStartValueName = "CodingFireGo"
+	// Deliberately the SAME name the C# build uses. The two builds are one app
+	// behind one login entry, so turning autostart on in either has to replace
+	// the other's path rather than add a second entry — a Run value holds
+	// exactly one path, and two entries would race for the single-instance
+	// mutex at every login.
+	autoStartValueName = "CodingFire"
+
+	// autoStartLegacyValueName is what this build wrote before it adopted the
+	// C# build's identity. Left behind, it would start a second copy at login
+	// and turning autostart off would delete only the new value — the
+	// campfire would keep appearing while the checkmark said otherwise. It is
+	// removed the first time AutoStartApply runs.
+	autoStartLegacyValueName = "CodingFireGo"
 )
+
+// cleanLegacyAutoStart removes the pre-merge Run value, if a previous version
+// of this build left one behind. "CodingFireGo" is unambiguously ours, so
+// deleting it cannot touch an entry the user created by hand.
+func cleanLegacyAutoStart() {
+	k, err := registry.OpenKey(registry.CURRENT_USER, autoStartRunKey, registry.SET_VALUE|registry.QUERY_VALUE)
+	if err != nil {
+		return // no key at all, so nothing of ours can be in it
+	}
+	defer k.Close()
+
+	if _, _, err := k.GetStringValue(autoStartLegacyValueName); err != nil {
+		return // already clean
+	}
+	if err := k.DeleteValue(autoStartLegacyValueName); err != nil {
+		LogWarn("legacy autostart cleanup failed: " + err.Error())
+	}
+}
 
 // AutoStartEnabled reports whether the Run entry is actually present. The
 // registry is the authority here, not the setting.
@@ -35,10 +60,13 @@ func AutoStartEnabled() bool {
 // AutoStartApply drives the Run entry to desired.
 //
 // It writes nothing when the entry is already in the target state, so a normal
-// startup never touches the registry. A false return means the write failed
-// (group policy, permissions, locked hive) and the caller should roll the
-// setting back.
+// startup never touches the registry — the one exception being
+// cleanLegacyAutoStart, which runs once after an upgrade and only deletes. A
+// false return means the write failed (group policy, permissions, locked hive)
+// and the caller should roll the setting back.
 func AutoStartApply(desired bool) bool {
+	cleanLegacyAutoStart()
+
 	if desired {
 		exe := executablePath()
 		if exe == "" {

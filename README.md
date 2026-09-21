@@ -126,9 +126,16 @@ locally.
 
 | OS | Directory |
 |---|---|
-| Windows | `%APPDATA%\CodingFireGo\` |
-| Linux | `$XDG_CONFIG_HOME/CodingFireGo/` (usually `~/.config/CodingFireGo/`) |
-| macOS | `~/Library/Application Support/CodingFireGo/` |
+| Windows | `%APPDATA%\CodingFire\` |
+| Linux | `$XDG_CONFIG_HOME/CodingFire/` (usually `~/.config/CodingFire/`) |
+| macOS | `~/Library/Application Support/CodingFire/` |
+
+This is the same directory the
+[C# build](https://github.com/wangsrGit119/codingfire-win) uses, on purpose. The
+file formats are identical, so the two are one app with two implementations:
+moving between them keeps your whole history and your settings. It also means
+only one of them can run at a time, which is what you want - two processes
+appending to one store would just duplicate it.
 
 `usage.ndjson` is the event store (45-day retention), `cursors.json` the per-file
 read offsets, `settings.json` your preferences, and `codingfire.log` errors only.
@@ -137,8 +144,8 @@ Set `CODINGFIRE_DATA_DIR` for a portable data directory instead.
 The only thing written outside that folder is the autostart entry, and only while
 the toggle is on. It needs no admin rights and is removed again the moment you turn
 autostart off: an `HKCU\...\Run` value on Windows, an XDG `.desktop` file on Linux,
-a LaunchAgent on macOS. Every name carries the `Go` marker, so it cannot collide
-with another copy of the app.
+a LaunchAgent on macOS. Those names are shared with the C# build as well, so the
+two can never both claim the login slot.
 
 Headless self-checks:
 

@@ -28,11 +28,17 @@ import (
 
 // singleInstanceName is the mutex guarding the tray.
 //
-// Deliberately different from the C# build's "CodingFire.SingleInstance": the
-// two builds are meant to coexist, and a shared name would make the Go build
-// exit silently whenever the C# one happened to be running — which reads as a
-// crash, not as a guard.
-const singleInstanceName = "CodingFire.Go.SingleInstance"
+// Deliberately the SAME name the C# build uses. The two builds share one data
+// directory (see appPaths), and one directory must not have two writers: they
+// would both append to usage.ndjson and both rewrite cursors.json, so the
+// store would grow duplicates and the login entry could be toggled by
+// whichever happened to be running. One instance of "CodingFire" is the whole
+// point.
+//
+// The cost is that launching this build while the C# one is running exits
+// silently. That is the same thing double-clicking the exe twice does, and it
+// is the honest answer now that both are the same app.
+const singleInstanceName = "CodingFire.SingleInstance"
 
 // dumpScanTimeout caps the initial baseline scan. Sources grew to include
 // SQLite databases and recursive log trees, so the C# build's 60s is kept

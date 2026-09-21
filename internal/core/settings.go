@@ -79,13 +79,26 @@ func (s FlameSize) PixelScale() float64 {
 // ---------------------------------------------------------------------------
 
 // AppPaths holds the on-disk layout. Everything lives under
-// %APPDATA%\CodingFireGo. The only thing that does NOT live here is the
-// auto-start entry, which must go to HKCU\...\Run (see autostart_windows.go).
+// %APPDATA%\CodingFire, which is the SAME directory the C# build uses. The
+// only thing that does NOT live here is the auto-start entry, which has to go
+// to HKCU\...\Run (see autostart_windows.go) and to the equivalent place on
+// the other two platforms.
 //
-// The root is deliberately NOT the C# version's %APPDATA%\CodingFire: both
-// builds keep independent cursors over the same log tree, and sharing
-// cursors.json would make each one skip whatever the other had already
-// advanced past. Same file formats, different root.
+// Sharing the root is deliberate: the file formats are identical, so the two
+// builds are one app with two implementations, and switching between them
+// keeps the whole history and the user's settings.
+//
+// The reason the roots were originally split was that two cursors over one log
+// tree made each build skip whatever the other had already read. That cannot
+// happen once the root is shared — there is one cursor over one store, and a
+// cursor that is behind merely re-reads a range the store already holds, whose
+// duplicate event ids are dropped on load.
+//
+// Two writers in this directory would still be a mistake, which is why the
+// single-instance mutex is shared with the C# build too (see main.go).
+//
+// Older Go builds used a separate CodingFireGo directory. Nothing reads or
+// writes it any more.
 type appPaths struct{}
 
 // AppPaths is the exported singleton.
@@ -106,7 +119,7 @@ func (appPaths) DataDir() string {
 			dir = overridden
 		}
 	} else {
-		dir = filepath.Join(configDir(), "CodingFireGo")
+		dir = filepath.Join(configDir(), "CodingFire")
 	}
 	_ = os.MkdirAll(dir, 0o755)
 	return dir

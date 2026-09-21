@@ -13,14 +13,35 @@ import (
 // shares the property that matters most here — the entry only takes effect at
 // the next login, never for the running session.
 //
-// The label is deliberately "com.codingfire.go", NOT "com.codingfire", for the
-// same reason the Windows Run value is "CodingFireGo": a launchd label names
-// exactly one job, so sharing one would make the two builds fight over the
-// login slot while both still reported autostart as enabled.
+// The label is deliberately "com.codingfire", matching the Windows Run value
+// and the Linux .desktop file: a launchd label names exactly one job, and the
+// two builds are one app behind one login entry, so enabling autostart in
+// either has to replace the other's path rather than add a second job that
+// would race for the single-instance mutex at every login.
 const (
-	autoStartLabel = "com.codingfire.go"
+	autoStartLabel = "com.codingfire"
 	autoStartPlist = autoStartLabel + ".plist"
 )
+
+// legacyAutoStartPlist is the job this build wrote before it adopted the C#
+// build's identity. Left behind, it would start a second copy at login, and
+// turning autostart off would remove only the new plist — the campfire would
+// keep appearing while the setting said otherwise.
+const legacyAutoStartPlist = "com.codingfire.go.plist"
+
+// cleanLegacyAutoStart removes the pre-merge LaunchAgent, if a previous version
+// of this build left one behind. The name is unambiguously ours, so deleting it
+// cannot touch a job the user created by hand.
+func cleanLegacyAutoStart() {
+	home := AppPaths.Home()
+	if home == "" {
+		return
+	}
+	legacy := filepath.Join(home, "Library", "LaunchAgents", legacyAutoStartPlist)
+	if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+		LogWarn("legacy autostart cleanup failed: " + err.Error())
+	}
+}
 
 // autoStartPath is the plist launchd reads.
 //
@@ -50,14 +71,17 @@ func AutoStartEnabled() bool {
 // AutoStartApply drives the autostart entry to desired.
 //
 // It writes nothing when the entry is already in the target state, so a normal
-// startup never touches the file. A false return means the write failed (a
-// read-only home directory, a full disk) and the caller should roll the
-// setting back.
+// startup never touches the file — the one exception being cleanLegacyAutoStart,
+// which runs once after an upgrade and only deletes. A false return means the
+// write failed (a read-only home directory, a full disk) and the caller should
+// roll the setting back.
 //
 // The job is not bootstrapped into the running launchd session. Writing the
 // file is exactly the Windows semantics — the entry applies at the next login
 // — and it keeps a settings toggle from spawning launchctl.
 func AutoStartApply(desired bool) bool {
+	cleanLegacyAutoStart()
+
 	path := autoStartPath()
 	if path == "" {
 		LogWarn("autostart skipped: cannot resolve the home directory")

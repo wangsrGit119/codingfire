@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/go-gui-org/go-gui/gui"
+	"github.com/wangsrGit119/codingfire/internal/core"
 	"github.com/wangsrGit119/codingfire/internal/fire"
 	"golang.org/x/sys/windows"
 )
@@ -24,8 +25,11 @@ func TestOverlayMemoryProbe(t *testing.T) {
 		t.Skip("opt-in memory probe")
 	}
 	dir := t.TempDir()
+	// Seed the copy from the real store rather than a fixed path, so the probe
+	// keeps measuring a realistic dataset if the layout moves.
+	live := core.AppPaths.DataDir()
 	for _, name := range []string{"usage.ndjson", "cursors.json", "meta.json"} {
-		if body, err := os.ReadFile(filepath.Join(os.Getenv("APPDATA"), "CodingFireGo", name)); err == nil {
+		if body, err := os.ReadFile(filepath.Join(live, name)); err == nil {
 			if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
 				t.Fatal(err)
 			}

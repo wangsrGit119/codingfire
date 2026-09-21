@@ -111,9 +111,13 @@ arm64，每个都是一个单文件 zip，且每个都在与自己匹配的 runn
 
 | 系统 | 目录 |
 |---|---|
-| Windows | `%APPDATA%\CodingFireGo\` |
-| Linux | `$XDG_CONFIG_HOME/CodingFireGo/`（一般是 `~/.config/CodingFireGo/`） |
-| macOS | `~/Library/Application Support/CodingFireGo/` |
+| Windows | `%APPDATA%\CodingFire\` |
+| Linux | `$XDG_CONFIG_HOME/CodingFire/`（一般是 `~/.config/CodingFire/`） |
+| macOS | `~/Library/Application Support/CodingFire/` |
+
+这里就是 [C# 版](https://github.com/wangsrGit119/codingfire-win) 用的那个目录，**有意共用**：
+两边文件格式完全一致，所以它们是同一个应用的两种实现 —— 来回切换不丢历史，也不丢设置。
+代价是同一时刻只能跑一个，而这正是想要的：两个进程往同一份库里追加，只会把它写重复。
 
 `usage.ndjson` 是事件库（保留 45 天），`cursors.json` 记录每个文件的读取游标，
 `settings.json` 是你的偏好设置，`codingfire.log` 只在出错时写。设
@@ -121,7 +125,7 @@ arm64，每个都是一个单文件 zip，且每个都在与自己匹配的 runn
 
 唯一写在这个目录之外的是开机自启项，且只在开关打开时才写。它不需要管理员权限，
 关掉自启的瞬间就会被删掉：Windows 是 `HKCU\...\Run` 值，Linux 是 XDG `.desktop` 文件，
-macOS 是 LaunchAgent。所有名字都带 `Go` 标记，不会和另一份副本撞名。
+macOS 是 LaunchAgent。这些名字同样和 C# 版共用，所以两者不可能同时占住登录项。
 
 无界面自检：
 
