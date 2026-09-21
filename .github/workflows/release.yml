@@ -260,6 +260,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # This job never checks the repo out - it only needs the downloaded
+          # zips - so gh cannot infer the repository from the working directory.
+          # Without -R every gh call dies with "fatal: not a git repository".
+          $repo = '${{ github.repository }}'
           $ver = '${{ needs.verify.outputs.version }}'
           $tag = "v$ver"
           $zips = @(Get-ChildItem -Path assets -Filter *.zip | ForEach-Object { $_.FullName })
@@ -285,16 +289,16 @@ jobs:
             'binary and no .NET dependency.'
           ) -join "`n"
 
-          gh release view $tag 2>$null | Out-Null
+          gh release view $tag -R $repo 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             Write-Host "release $tag already exists - replacing assets"
-            gh release upload $tag $zips --clobber
+            gh release upload $tag $zips -R $repo --clobber
             if ($LASTEXITCODE -ne 0) { throw "gh release upload failed (exit $LASTEXITCODE)." }
             # Notes are regenerated on every run, so re-running the workflow after
             # adding a platform cannot leave the old platform list behind.
-            gh release edit $tag --title "CodingFire $tag" --notes $notes
+            gh release edit $tag -R $repo --title "CodingFire $tag" --notes $notes
           } else {
-            gh release create $tag $zips --title "CodingFire $tag" --notes $notes --target $env:GITHUB_SHA
+            gh release create $tag $zips -R $repo --title "CodingFire $tag" --notes $notes --target $env:GITHUB_SHA
           }
           if ($LASTEXITCODE -ne 0) { throw "gh failed (exit $LASTEXITCODE)." }
           Write-Host "published $tag"
