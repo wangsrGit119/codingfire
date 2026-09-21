@@ -232,8 +232,10 @@ type Settings struct {
 	FlameVisible bool
 	ShowLiveRate bool
 
-	// AutoStart defaults to ON, so the first run installs the Run key. The
-	// tray menu can turn it off. AutoStart syncs the actual registry value.
+	// AutoStart defaults to ON, so the first run installs the login entry (the
+	// HKCU Run value on Windows, an XDG autostart file on Linux, a LaunchAgent
+	// on macOS). The tray menu can turn it off. AutoStart syncs the actual
+	// on-disk state.
 	AutoStart bool
 
 	// FlameColor is the flame theme colour, normalised RGB. Default classic

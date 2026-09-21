@@ -1,5 +1,5 @@
 //
-//  main.go — CodingFire for Windows
+//  main.go — CodingFire
 //
 //  Entry point. Besides the normal tray launch there are two headless modes, so
 //  the thing can be verified without anyone watching a screen:

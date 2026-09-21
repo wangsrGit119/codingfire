@@ -13,15 +13,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CGO_ENABLED: '0'
-
 jobs:
   test:
-    # Windows, not Linux: a good part of this program is Windows-only
-    # (win32_windows.go, the layered-bitmap and GDI paths), and those files are
+    # Windows, not Linux: a good part of this program is Windows-only (the Win32
+    # window layer, the layered-bitmap and GDI paths), and those files are
     # excluded by build tags everywhere else. vet and test on Linux would pass
-    # while checking almost none of the code that ships.
+    # while checking almost none of the code that ships on the platform most
+    # users are on. Linux and macOS get their own jobs below.
     runs-on: windows-latest
 
     steps:
@@ -35,13 +33,19 @@ jobs:
           cache: true
 
       - name: go vet
+        env:
+          CGO_ENABLED: '0'
         run: go vet ./...
 
       - name: go test
+        env:
+          CGO_ENABLED: '0'
         run: go test ./...
 
       - name: Build
         shell: pwsh
+        env:
+          CGO_ENABLED: '0'
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:GOOS   = 'windows'
@@ -50,10 +54,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
           Write-Host ("built {0:N0} bytes" -f (Get-Item dist/CodingFire.exe).Length)
 
-  # Every target the release workflow publishes, compiled on each push. Keeping
-  # this here means a change that breaks one platform shows up on the commit that
+  # The Windows and Linux targets are pure Go, so they compile anywhere. Keeping
+  # this here means a change that breaks one of them shows up on the commit that
   # broke it rather than on the tag, when the release job would simply refuse to
   # publish.
+  #
+  # darwin is deliberately absent: the metal backend is cgo, and a
+  # CGO_ENABLED=0 darwin build selects gui/backend/run_default.go, whose RunApp
+  # panics "no native backend available" — it would compile here and be broken on
+  # launch, which is exactly the failure this job exists to prevent.
   crossbuild:
     runs-on: ubuntu-latest
     strategy:
@@ -64,8 +73,6 @@ jobs:
           - { goos: windows, goarch: arm64 }
           - { goos: linux,   goarch: amd64 }
           - { goos: linux,   goarch: arm64 }
-          - { goos: darwin,  goarch: amd64 }
-          - { goos: darwin,  goarch: arm64 }
 
     steps:
       - name: Checkout
@@ -79,6 +86,8 @@ jobs:
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         shell: pwsh
+        env:
+          CGO_ENABLED: '0'
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:GOOS   = '${{ matrix.goos }}'
@@ -88,3 +97,97 @@ jobs:
           go build -trimpath -ldflags $ldflags -o $exe .
           if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
           Write-Host ("built {0:N0} bytes" -f (Get-Item $exe).Length)
+
+  # The Linux window layer is only observable at runtime, so this job runs the
+  # binary: --dump headlessly, then the GUI under a virtual X server, where it
+  # has to find its own window by _NET_WM_PID and style it. A compiler cannot
+  # check any of that, and getting it wrong is silent — the campfire would simply
+  # sit in the corner of the screen unmanaged.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet (linux)
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+        run: go vet ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+
+      # A GitHub runner has no GPU, so the virtual display needs the client-side
+      # EGL and Mesa's software rasteriser (llvmpipe).
+      - name: Install a virtual X server and a software GL stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils \
+            libegl1 libegl-mesa0 libgl1 libglx-mesa0 libgl1-mesa-dri \
+            libx11-6 libxext6 libxrandr2 libxcursor1 libxi6
+
+      - name: Smoke test
+        env:
+          GALLIUM_DRIVER: llvmpipe
+        run: |
+          chmod +x scripts/linux-smoke.sh
+          xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux-smoke.sh dist/CodingFire
+
+  # macOS cannot be cross-compiled — the metal backend is cgo and needs the SDK —
+  # so it gets its own runner. CGO_ENABLED=1 is what makes the difference between
+  # a working app and one that panics on launch.
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet (darwin)
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+        run: go vet ./...
+
+      - name: Build darwin/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+          ls -l dist/CodingFire
+
+      # --dump is headless, so unlike the GUI it can be run here. It proves the
+      # binary starts and reaches the data layer, which a build alone does not.
+      - name: Run the headless report
+        run: |
+          ./dist/CodingFire --dump "$RUNNER_TEMP/dump.txt"
+          head -3 "$RUNNER_TEMP/dump.txt"
+          if ! head -1 "$RUNNER_TEMP/dump.txt" | grep -q '^CodingFire '; then
+            echo "the report has no header line" >&2; exit 1
+          fi

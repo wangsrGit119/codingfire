@@ -3,8 +3,6 @@
 package core
 
 import (
-	"os"
-
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -82,14 +80,4 @@ func AutoStartApply(desired bool) bool {
 		return false
 	}
 	return true
-}
-
-// executablePath returns the running binary's full path, or "" when it cannot
-// be resolved — in which case the caller must not write the registry.
-func executablePath() string {
-	exe, err := os.Executable()
-	if err != nil || exe == "" {
-		return ""
-	}
-	return exe
 }

@@ -4,6 +4,7 @@ package gl
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 
 	"github.com/jezek/xgb"
@@ -124,6 +125,7 @@ func New(w *gui.Window) (*Backend, error) {
 	b.plat.curCrtc = crtc
 
 	setWindowTitle(conn, win, title)
+	setWindowPID(conn, win)
 	// Hints are in physical pixels, matching the CreateWindow call.
 	b.plat.limits = gui.WindowSizeLimits(cfg)
 	setSizeHints(conn, win, b.plat.limits.Scaled(scale))
@@ -219,6 +221,23 @@ func setWindowTitle(conn *xgb.Conn, win xproto.Window, title string) {
 	xproto.ChangeProperty(conn, xproto.PropModeReplace, win,
 		xproto.AtomWmName, xproto.AtomString, 8,
 		uint32(len(title)), []byte(title))
+}
+
+// setWindowPID publishes _NET_WM_PID, the EWMH convention for naming the
+// process a window belongs to.
+//
+// X core has no ownership query: a client cannot ask the server which windows
+// are its own. Without this property there is nothing to distinguish our
+// windows from any other client's, which is what an overlay that has to
+// restyle a window it cannot address by handle needs — the Win32 side gets the
+// equivalent from EnumWindows + GetWindowThreadProcessId.
+func setWindowPID(conn *xgb.Conn, win xproto.Window) {
+	pid := os.Getpid()
+	buf := []byte{
+		byte(pid), byte(pid >> 8), byte(pid >> 16), byte(pid >> 24),
+	}
+	xproto.ChangeProperty(conn, xproto.PropModeReplace, win,
+		internAtom(conn, "_NET_WM_PID"), xproto.AtomCardinal, 32, 1, buf)
 }
 
 // XSizeHints flag bits (Xutil.h). Only the two size bounds are used;

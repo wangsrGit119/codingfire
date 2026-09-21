@@ -1,9 +1,9 @@
-# CodingFire for Windows（Go 版）
+# CodingFire（Go 版）
 
 把 AI 编程烧掉的 token 变成桌面上的一把像素篝火 —— 火势就是当前的 token 消耗速率。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey)](#系统要求)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#系统要求)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8)](#从源码构建)
 [![Release](https://img.shields.io/github/v/release/wangsrGit119/codingfire)](../../releases)
 [![CI](https://github.com/wangsrGit119/codingfire/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
@@ -34,36 +34,57 @@
 |---|---|
 | Windows 11 / 10（64 位） | 无，单个自包含 exe |
 | Windows 8 / 8.1、Windows 7 SP1 | 请改用 [C# 版](https://github.com/wangsrGit119/codingfire-win) |
-| Linux / macOS | **实验性**：会构建发布，但尚不可用 |
+| Linux（x64、arm64） | X11 会话 + 合成器（透明窗口需要），托盘还需要一个 StatusNotifier 宿主 |
+| macOS（Intel、Apple 芯片） | 除了首次放行 Gatekeeper 之外，无 |
 
-Go 1.21 起不再支持 Windows 7 / 8，所以本版**只支持 Win10 及以上**。以
+Go 1.21 起不再支持 Windows 7 / 8，所以 Windows 版**只支持 Win10 及以上**。以
 `CGO_ENABLED=0` 编译、不链接 C 运行库，所以是完全静态的单个文件 ——
 代价是体积约 18 MB（C# 版是 191 KB）。磁盘很便宜，缺 DLL 不便宜。
 
-每次发布也会附上 Linux（`x64` / `arm64`）与 macOS（`x64` / `arm64`）的压缩包，
-**给后续移植留个落点，但目前还不能用**：`internal/ui/win32_other.go`、
-`internal/core/autostart_other.go` 等平台桩是有意留空的 no-op，所以在非 Windows 上
-既没有鼠标穿透，也没有窗口定位和开机自启。**正式支持的只有 Windows**；
-`windows/arm64` 会构建发布，但从未实机跑过。
+**Windows 是打磨最充分的目标平台** —— 程序本来就是为它写的，也是唯一使用原生分层位图
+窗口的版本。Linux 与 macOS 分别走 go-gui 的 X11 与 Metal 后端，外加一层自己的平台垫片
+来补 go-gui 没暴露的窗口管理；各自的前置条件和已知粗糙之处见
+[各平台说明](#各平台说明)。`windows/arm64` 会构建发布，但从未实机跑过。
 
 ## 下载与运行
 
-到 [Releases](../../releases) 下载最新 zip，解压到任意目录，双击 `CodingFire.exe`。
+到 [Releases](../../releases) 下载最新 zip，解压到任意目录直接运行。
 压缩包里只有一个文件，没有安装过程。
 
 - **鼠标移到火上** —— 当日用量卡片、实时 tok/s、当前档位
 - **右键 / 双击托盘图标** —— 菜单与统计控制台
-- **默认开机自启** —— 不想要的话在托盘菜单里取消勾选即可
+- **默认随桌面启动** —— 不想要的话在菜单里取消勾选即可
 
 首次启动没有数据时，火保持「余烬」状态，属正常。
 
 ### 鼠标穿透
 
 Windows 版火焰和悬浮卡片使用原生分层位图窗口，与 C# 版一样，全透明像素天然不拦截点击。
-本版还提供了一个**鼠标穿透**开关（托盘菜单，以及控制台「设置」页），**默认开启**，
+各平台也都提供**鼠标穿透**开关（托盘菜单，以及控制台「设置」页），**默认开启**，
 免得篝火把本该点给桌面图标的点击吃掉。把鼠标移到篝火上，按住鼠标左键即可拖动；
 由于穿透窗口收不到普通鼠标消息，程序会轮询全局鼠标按键状态来实现拖动。关闭鼠标穿透
 后，篝火窗口本身也会接收点击。
+
+## 各平台说明
+
+悬浮窗不是一套实现，而是三套，分别位于 `internal/ui/win32_*.go`，对外是同一组接口。
+三者都要自己找到窗口、置顶、做穿透、移动位置，而**这些都没有任何编译期信号**。
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| 后端 | Win32 + WGL | X11 + EGL | AppKit + Metal |
+| 置顶 | `SetWindowPos(HWND_TOPMOST)` | `_NET_WM_STATE_ABOVE` | `setLevel:` |
+| 穿透 | `WS_EX_TRANSPARENT` | 清空 `ShapeInput` 区域 | `setIgnoresMouseEvents:` |
+| 自启 | `HKCU\...\Run` | XDG `.desktop` | LaunchAgent plist |
+| 托盘 | `Shell_NotifyIcon` | StatusNotifierItem（D-Bus） | `NSStatusItem` |
+
+- **Linux** 的透明窗口需要合成器：没有合成器时篝火会画在不透明矩形上。托盘走
+  StatusNotifierItem，KDE / XFCE / LXQt 原生支持，GNOME 需要装扩展；没有宿主时程序
+  照常运行，只是没有菜单可以退出。
+- **macOS** 发布的是未签名包，首次启动会被 Gatekeeper 拦下，需要在「系统设置 ›
+  隐私与安全性」里放行一次。程序没有 Dock 图标，常驻菜单栏。
+- **各平台都还没做**逐像素穿透。go-gui 把窗口当成一整块画面并自己做命中测试，所以穿透
+  只能是全有或全无。C# 版靠 `UpdateLayeredWindow` 拿到逐像素穿透，本版做不到。
 
 ## 支持的数据源
 
@@ -93,7 +114,8 @@ WorkBuddy 的国内版与国外版是两份独立安装、两个 home 目录（`
 
 ## 从源码构建
 
-需要 **Go 1.26 或更高**。不需要 C 编译器，不需要 Visual Studio。
+需要 **Go 1.26 或更高**。Windows 上不需要 C 编译器，也不需要 Visual Studio；
+macOS 上 Xcode 命令行工具自带的 C 工具链**是必需的**，因为 Metal 后端是 cgo。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1            # vet + 构建 -> dist\
@@ -106,6 +128,20 @@ powershell -ExecutionPolicy Bypass -File release.ps1 -Version 1.0.0   # 打包 +
 构建会先跑 `go vet ./...`，有告警就直接中止。产物是 `dist\CodingFire.exe`，带
 `-trimpath` 与 `-ldflags "-s -w -H=windowsgui"`，所以双击不会弹控制台窗口。
 
+非 Windows 平台没有对应脚本（`build.ps1` / `release.ps1` 是 Windows 脚本），直接 `go build`：
+
+```bash
+# Linux：纯 Go，不用 cgo，任何机器上都能交叉编译
+CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+
+# macOS：cgo 不是可选项，且需要 macOS SDK
+CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+```
+
+macOS 上用 `CGO_ENABLED=0` 能编过，但一启动就 panic：
+*"no native backend available"* —— go-gui 只在开启 cgo 时才选 Metal 后端。
+所以 macOS 产物是在 macOS runner 上构建的，而不是交叉编译。
+
 版本号只有一处出处：`internal/core/version.go`。Go 二进制没有版本资源，所以
 `release.ps1` 和发版工作流都是从源码里读出这个常量，与 tag 不一致就拒绝发布。
 
@@ -116,10 +152,13 @@ go test ./...    # 全部包
 go vet ./...     # build.ps1 编译前跑的就是这个
 ```
 
-每次 push 和 PR 都会在 CI 里跑这两条
-（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。
+每次 push 和 PR 都会在 Windows、Linux、macOS 三端跑这两条
+（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。Linux 那个 job 还会在虚拟
+X 服务器下**真的把程序启动起来**，确认它能正常起来
+（[`scripts/linux-smoke.sh`](scripts/linux-smoke.sh)）—— X11 窗口层没有任何编译期信号，
+做错了是完全静默的。
 
-有一个测试是默认跳过的：悬浮窗内存探针，它会真的创建窗口、耗时约 16 秒。要跑得显式打开：
+有一个测试是默认跳过的：悬浮窗内存探针，它会真的创建窗口、耗时约 16 秒（仅 Windows）。要跑得显式打开：
 
 ```powershell
 $env:CODINGFIRE_MEMORY_PROBE = '1'
@@ -132,8 +171,12 @@ go test ./internal/ui -run TestOverlayMemoryProbe -v -count=1
 `replace` 指向本地目录。**它们是故意提交进仓库的**，这样 clone 下来不用联网取依赖
 就能构建：
 
-- **go-gui** —— Windows 托盘菜单没有跳过 root 哨兵节点，导致所有菜单动作整体错一位；
-  子菜单也不会把索引返回给后面的兄弟项。这个 fork 两处都修了。**上游升级后要重新检查这个补丁。**
+- **go-gui** —— 共三处补丁，**上游升级后每一处都要重新检查**：
+  - Windows：托盘菜单没有跳过 root 哨兵节点，导致所有菜单动作整体错一位；
+    子菜单也不会把索引返回给后面的兄弟项。这个 fork 两处都修了。
+  - X11：创建窗口时没有写 `_NET_WM_PID`。X 协议本身没有「窗口归属」查询，缺了这个属性
+    就无法把自己进程的窗口和别的客户端区分开 —— 而悬浮窗恰恰必须找到自己的窗口，
+    因为 go-gui 把 XID 藏起来了。
 - **go-glyph** —— 上游的全局字体缓存上限 384 MiB，且空闲五分钟后才淘汰，对一个小型
   常驻桌面工具来说完全不合适。这个 fork 加了释放接口，关闭控制台时把内存还回去。
 
@@ -143,7 +186,7 @@ go test ./internal/ui -run TestOverlayMemoryProbe -v -count=1
 [`.github/workflows/release.yml`](.github/workflows/release.yml) 会自动构建、打包并发布：
 
 ```bash
-git tag -a v1.0.0 -m "CodingFire for Windows (Go) v1.0.0"
+git tag -a v1.0.0 -m "CodingFire (Go) v1.0.0"
 git push origin v1.0.0
 ```
 
@@ -154,16 +197,25 @@ Actions 页面手动触发，自己填版本号。
 流水线会**在往 release 挂任何东西之前**失败。目标：`windows/amd64`、`windows/arm64`、
 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`，每个都是一个单文件 zip。
 
-每个产物都会按自己的标签校验：Windows `amd64` 那个会被真正执行、读回 `--dump` 头；
-交叉编译的用 `go version -m` 确认二进制里记录的 `GOOS`/`GOARCH` 与它将挂上去的名字
-一致，再扫一遍版本号字面量。`.github/workflows/ci.yml` 在每次 push 时编译同一套矩阵，
-所以某个平台被改坏会在**造成破坏的那次提交上**暴露，而不是等到打 tag。
+每个目标都在**与自己匹配的 runner** 上构建，所以校验是真的校验而不是只编一遍：
+
+- **windows** 与 **linux** 用 `CGO_ENABLED=0` 交叉编译。Windows `amd64` 那个会被真正
+  执行、读回 `--dump` 头；Linux `amd64` 那个先跑一次无界面报告，再在 Xvfb 下启动。
+- **macos** 在 macOS runner 上以 `CGO_ENABLED=1` 构建，并执行一次 `--dump`。
+- 所有产物还会用 `go version -m` 确认二进制里记录的 `GOOS`/`GOARCH` 与它将挂上去的名字
+  一致，再扫一遍版本号字面量。
 
 不想等 runner 的话，`release.ps1` 在本地做同样的事（只构建 Windows 目标）。
 
 ## 数据放在哪
 
-全部落在 `%APPDATA%\CodingFireGo\`：
+全部落在一个目录里：
+
+| 系统 | 目录 |
+|---|---|
+| Windows | `%APPDATA%\CodingFireGo\` |
+| Linux | `$XDG_CONFIG_HOME/CodingFireGo/`（一般是 `~/.config/CodingFireGo/`） |
+| macOS | `~/Library/Application Support/CodingFireGo/` |
 
 | 文件 | 用途 |
 |---|---|
@@ -174,10 +226,17 @@ Actions 页面手动触发，自己填版本号。
 
 设 `CODINGFIRE_DATA_DIR` 可切便携模式。
 
-唯一写在这个目录之外的东西，是「开机自启」在
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的一条值，值名是
-`CodingFireGo`。它不需要管理员权限，关掉自启时会立刻被删掉。C# 版用的值名是
-`CodingFire`，两版不会互相覆盖。
+唯一写在这个目录之外的东西是「开机自启」项，且只在开关打开时才写。它不需要管理员权限，
+关掉自启时会立刻被删掉：
+
+| 系统 | 写在哪 |
+|---|---|
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，值名 `CodingFireGo` |
+| Linux | `$XDG_CONFIG_HOME/autostart/CodingFireGo.desktop` |
+| macOS | `~/Library/LaunchAgents/com.codingfire.go.plist` |
+
+每个名字都带 `Go` 标记，所以不会和 C# 版（用的是不带标记的名字）撞上：两版本就设计成
+可以共存，名字撞了会让其中一版悄悄把另一版的自启项关掉。
 
 无界面自检：
 
@@ -201,6 +260,9 @@ CodingFire.exe --render 目录       # 把各档火势渲染成 PNG
 正常运行不创建 OpenGL 上下文。悬浮统计每秒刷新两次。关闭控制台时真正销毁窗口，
 并释放共享字体缓存。
 
+非 Windows 平台全部由 go-gui 的 OpenGL 后端绘制，因此需要可用的 GL 驱动 —— 真显卡，
+或者 Mesa 的软件光栅器（`llvmpipe`），CI 用的就是后者。
+
 同场景内存探针测得：火焰约 33 MiB、悬浮卡片约 34 MiB、关闭控制台后约 37 MiB。
 控制台打开期间仍有较大的临时开销（本次约 182 MiB）。这是进程工作集，不是固定内存承诺；
 详见[对比记录](perf-artifacts/memory-optimization-report.md)。目前未达到 C# 版反馈的 14 MB。
@@ -214,8 +276,8 @@ token 统计。重新编译后，请退出正在运行的旧副本，再启动 `
 ## 致谢
 
 本项目是 macOS 版 **[TinyFire](https://github.com/wdkwdkwdk/tinyfire)**（作者
-[@wdkwdkwdk](https://github.com/wdkwdkwdk)，MIT 协议）的 Windows 版本，
-感谢原作者给出的创意与核心算法。数据源口径对齐
+[@wdkwdkwdk](https://github.com/wdkwdkwdk)，MIT 协议）的重写版，先做 Windows，
+之后移植到 Linux 与 macOS，感谢原作者给出的创意与核心算法。数据源口径对齐
 [juejin-cn/juejin-usage](https://github.com/juejin-cn/juejin-usage)。桌面窗口、托盘
 与控制台基于 [go-gui](https://github.com/go-gui-org/go-gui) 构建。
 

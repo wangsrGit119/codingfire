@@ -1,9 +1,9 @@
-# CodingFire for Windows (Go)
+# CodingFire (Go)
 
 Turn your AI coding token burn into a pixel campfire on the desktop.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey)](#requirements)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#requirements)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8)](#build-from-source)
 [![Release](https://img.shields.io/github/v/release/wangsrGit119/codingfire)](../../releases)
 [![CI](https://github.com/wangsrGit119/codingfire/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
@@ -37,41 +37,68 @@ tools already write to disk. The faster you burn tokens, the bigger the fire.
 |---|---|
 | Windows 11 / 10 (64-bit) | Nothing - one self-contained `.exe` |
 | Windows 8 / 8.1, Windows 7 SP1 | Use the [C# build](https://github.com/wangsrGit119/codingfire-win) instead |
-| Linux / macOS | **Experimental** - builds are published, but not usable yet |
+| Linux (x64, arm64) | An X11 session with a compositing manager, and a StatusNotifier host for the tray |
+| macOS (Intel, Apple silicon) | Nothing beyond Gatekeeper's approval - one unsigned binary |
 
-Go 1.21 dropped Windows 7 and 8 support, so this build is Windows 10 and later.
-It is compiled with `CGO_ENABLED=0` and links no C runtime: the binary is fully
-static, which is why it is ~18 MB rather than the C# build's 191 KB. Disk is
-cheap; a missing DLL is not.
+Go 1.21 dropped Windows 7 and 8 support, so the Windows build is Windows 10 and
+later. It is compiled with `CGO_ENABLED=0` and links no C runtime: the binary is
+fully static, which is why it is ~18 MB rather than the C# build's 191 KB. Disk
+is cheap; a missing DLL is not.
 
-Linux (`x64`, `arm64`) and macOS (`x64`, `arm64`) zips are attached to every
-release so that the port has somewhere to land, but **they are not usable yet**:
-the platform shims in `internal/ui/win32_other.go`, `internal/core/autostart_other.go`
-and friends are deliberate no-ops, so there is no click-through, no window
-positioning and no autostart off Windows. Windows is the only supported target;
-`windows/arm64` is built and published but has never been run.
+**Windows is the most thoroughly exercised target** - it is the one the app was
+written for, and the only one whose overlay uses native layered bitmap windows.
+Linux and macOS run through go-gui's X11 and Metal backends respectively, with a
+platform shim of their own for the window management go-gui does not expose; see
+[Platform notes](#platform-notes) for what each one needs and what is known to be
+rough. `windows/arm64` is built and published but has never been run.
 
 ## Download and run
 
 Grab the latest zip from [Releases](../../releases), unpack it anywhere and run
-`CodingFire.exe`. There is nothing to install - the zip contains exactly one file.
+it. There is nothing to install - each zip contains exactly one file.
 
 - **Hover the fire** - today's usage card, live tok/s, current tier
 - **Right-click / double-click the tray icon** - menu and statistics console
-- **Starts with Windows by default** - turn it off any time from the tray menu
+- **Starts with the desktop by default** - turn it off any time from the menu
 
 With no data yet the fire stays in an "embers" state. That is normal.
 
 ### Click-through
 
-The Windows flame and hover card use native layered bitmap windows, like the
-C# build. Transparent pixels pass clicks through. This build also provides a
-**Click-through** toggle (tray menu, and the
-Settings tab of the console), **on by default**, so the campfire does not swallow
-clicks meant for the desktop icons underneath it. Hold the left mouse button over
-the campfire to drag it; the app polls the global button state because a
-click-through window does not receive normal mouse messages. Turn click-through
-off if you want the campfire window itself to receive clicks.
+On Windows the flame and hover card use native layered bitmap windows, like the
+C# build, so transparent pixels pass clicks through. Every platform also offers a
+**Click-through** toggle (tray menu, and the Settings tab of the console), **on by
+default**, so the campfire does not swallow clicks meant for the desktop icons
+underneath it. Hold the left mouse button over the campfire to drag it; the app
+polls the global button state because a click-through window does not receive
+normal mouse messages. Turn click-through off if you want the campfire window
+itself to receive clicks.
+
+## Platform notes
+
+The overlay is not one thing but three, one per platform, behind the same small
+interface in `internal/ui/win32_*.go`. All three find their own window, keep it on
+top, make it click-through and move it; none of them can be checked by a compiler.
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| Backend | Win32 + WGL | X11 + EGL | AppKit + Metal |
+| On top | `SetWindowPos(HWND_TOPMOST)` | `_NET_WM_STATE_ABOVE` | `setLevel:` |
+| Click-through | `WS_EX_TRANSPARENT` | empty `ShapeInput` region | `setIgnoresMouseEvents:` |
+| Autostart | `HKCU\...\Run` | XDG `.desktop` | LaunchAgent plist |
+| Tray | `Shell_NotifyIcon` | StatusNotifierItem (D-Bus) | `NSStatusItem` |
+
+- **Linux** needs a compositing manager for the transparent window: without one
+  the campfire is drawn on an opaque rectangle. The tray is a StatusNotifierItem,
+  which KDE, XFCE and LXQt all host and GNOME only hosts with an extension
+  installed - without a host the app still runs, but has no menu to quit from.
+- **macOS** ships unsigned, so Gatekeeper blocks the first launch until it is
+  allowed under System Settings › Privacy & Security. The app has no Dock icon
+  and lives in the menu bar.
+- **Not yet implemented anywhere:** per-pixel click-through. go-gui renders a
+  window as a single surface and hit-tests its own widgets, so pass-through is
+  all-or-nothing. The C# build gets per-pixel pass-through from
+  `UpdateLayeredWindow`; this one cannot.
 
 ## Supported data sources
 
@@ -105,7 +132,9 @@ a few tools whose log schema could not be verified.
 
 ## Build from source
 
-Requires **Go 1.26 or later**. No C compiler, no Visual Studio.
+Requires **Go 1.26 or later**. On Windows, no C compiler and no Visual Studio.
+On macOS a C toolchain comes with Xcode's command line tools, and it is required:
+the Metal backend is cgo.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1            # vet + build -> dist\
@@ -119,6 +148,22 @@ The build runs `go vet ./...` before compiling and refuses to continue if it
 reports anything. The output is `dist\CodingFire.exe`, built with `-trimpath` and
 `-ldflags "-s -w -H=windowsgui"` so it opens without a console window.
 
+Off Windows, `go build` is all there is - `build.ps1` and `release.ps1` are
+Windows scripts:
+
+```bash
+# Linux: pure Go, no cgo, cross-compiles from anywhere
+CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+
+# macOS: cgo is not optional, and the build needs the macOS SDK
+CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+```
+
+`CGO_ENABLED=0` on macOS produces a binary that compiles and then panics on
+launch with *"no native backend available"*: go-gui only selects its Metal
+backend under cgo. This is why the macOS artifacts are built on a macOS runner
+rather than cross-compiled.
+
 The version lives in exactly one place, `internal/core/version.go`. A Go binary
 carries no version resource, so `release.ps1` and the release workflow both read
 that constant out of the source and refuse to publish if it does not match the
@@ -131,11 +176,14 @@ go test ./...    # all packages
 go vet ./...     # what build.ps1 runs before it compiles
 ```
 
-CI runs both on every push and pull request
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+CI runs both on every push and pull request, on Windows, Linux and macOS
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The Linux job also
+*starts the app* under a virtual X server and checks that it came up
+([`scripts/linux-smoke.sh`](scripts/linux-smoke.sh)) - the X11 window layer has
+no compile-time signature, and getting it wrong is silent.
 
 One test is opt-in: the overlay memory probe, which opens real windows and takes
-about 16 seconds. It is skipped unless you ask for it:
+about 16 seconds. It is Windows-only. It is skipped unless you ask for it:
 
 ```powershell
 $env:CODINGFIRE_MEMORY_PROBE = '1'
@@ -148,10 +196,14 @@ go test ./internal/ui -run TestOverlayMemoryProbe -v -count=1
 `replace` directives in `go.mod`. They are committed on purpose, so a clone
 builds without fetching anything:
 
-- **go-gui** - on Windows the tray menu does not skip its root sentinel node,
-  which shifts every menu action by one, and submenus do not return their index
-  to the sibling items that follow. The fork fixes both. Re-check this patch
-  after any upstream bump.
+- **go-gui** - three patches, each re-check after any upstream bump:
+  - Windows: the tray menu does not skip its root sentinel node, which shifts
+    every menu action by one, and submenus do not return their index to the
+    sibling items that follow. The fork fixes both.
+  - X11: `_NET_WM_PID` is not published when a window is created. X core has no
+    ownership query, so without that property there is nothing to distinguish
+    our windows from any other client's - and finding its own window is exactly
+    what the overlay needs, since go-gui keeps the XID private.
 - **go-glyph** - upstream keeps a global font cache of up to 384 MiB and only
   evicts entries after five idle minutes, which is the wrong trade for a small
   always-on desktop tool. The fork adds a release call so closing the console
@@ -164,7 +216,7 @@ Releases are cut by CI. Push a tag and
 and publishes it:
 
 ```bash
-git tag -a v1.0.0 -m "CodingFire for Windows (Go) v1.0.0"
+git tag -a v1.0.0 -m "CodingFire (Go) v1.0.0"
 git push origin v1.0.0
 ```
 
@@ -176,19 +228,30 @@ so a platform that stops compiling fails the run *before* anything is attached t
 the release. Targets: `windows/amd64`, `windows/arm64`, `linux/amd64`,
 `linux/arm64`, `darwin/amd64`, `darwin/arm64`, each as a one-file zip.
 
-Each artifact is checked against its own label: the Windows `amd64` binary is run
-and its `--dump` header read back, and the cross-compiled ones are inspected with
-`go version -m` to confirm the recorded `GOOS`/`GOARCH` matches the name they ship
-under, plus a scan for the version literal. `.github/workflows/ci.yml` compiles
-the same matrix on every push, so a break shows up on the commit that caused it
-rather than on the tag.
+Each target is built on a runner that matches it, which is what makes the
+verification real rather than a compile check:
+
+- **windows** and **linux** legs cross-compile with `CGO_ENABLED=0`. The Windows
+  `amd64` binary is then run and its `--dump` header read back; the Linux `amd64`
+  binary is run headlessly and then under Xvfb.
+- **macos** legs build on a macOS runner with `CGO_ENABLED=1`, and the binary is
+  run with `--dump`.
+- Every artifact is also inspected with `go version -m` to confirm the recorded
+  `GOOS`/`GOARCH` matches the name it ships under, plus a scan for the version
+  literal.
 
 `release.ps1` does the same work locally, for when you would rather not wait for
 a runner. It only builds the Windows target.
 
 ## Data and privacy
 
-Everything lives in `%APPDATA%\CodingFireGo\`:
+Everything lives in one directory:
+
+| OS | Directory |
+|---|---|
+| Windows | `%APPDATA%\CodingFireGo\` |
+| Linux | `$XDG_CONFIG_HOME/CodingFireGo/` (usually `~/.config/CodingFireGo/`) |
+| macOS | `~/Library/Application Support/CodingFireGo/` |
 
 | File | Purpose |
 |---|---|
@@ -199,11 +262,19 @@ Everything lives in `%APPDATA%\CodingFireGo\`:
 
 Set `CODINGFIRE_DATA_DIR` to use a portable data directory instead.
 
-The one thing written outside that folder is a single
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry for the autostart
-toggle, under the value name `CodingFireGo`. It needs no admin rights, and it is
-deleted again the moment you turn autostart off. The C# build uses the value name
-`CodingFire`, so the two do not collide.
+The one thing written outside that folder is the autostart entry, and only when
+the autostart toggle is on. It needs no admin rights, and it is deleted again the
+moment you turn autostart off:
+
+| OS | Entry |
+|---|---|
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `CodingFireGo` |
+| Linux | `$XDG_CONFIG_HOME/autostart/CodingFireGo.desktop` |
+| macOS | `~/Library/LaunchAgents/com.codingfire.go.plist` |
+
+Every name carries the `Go` marker so it cannot collide with the C# build's,
+which uses the unmarked names: the two are meant to install side by side, and a
+shared name would make each silently disable the other's login entry.
 
 Headless self-checks:
 
@@ -230,6 +301,10 @@ and GDI presentation; normal operation creates no OpenGL context. Closing the
 console destroys its window and releases the shared parsed-font cache. Hover
 statistics refresh twice per second.
 
+Off Windows everything is drawn by go-gui's OpenGL backend instead, so Linux and
+macOS need a working GL driver - a GPU, or Mesa's software rasteriser
+(`llvmpipe`), which is what CI uses.
+
 The memory probe measured approximately 33 MiB with the flame, 34 MiB with the
 hover card, and 37 MiB after closing the console. Opening the console still has
 a larger transient footprint (about 182 MiB in that probe). These are process
@@ -245,8 +320,9 @@ old running copy and launch `dist\CodingFire.exe` to use the new executable.
 
 ## Credits
 
-A Windows rewrite of the macOS app **[TinyFire](https://github.com/wdkwdkwdk/tinyfire)**
-by [@wdkwdkwdk](https://github.com/wdkwdkwdk) (MIT). Thanks for the original idea
+A rewrite of the macOS app **[TinyFire](https://github.com/wdkwdkwdk/tinyfire)**
+by [@wdkwdkwdk](https://github.com/wdkwdkwdk) (MIT), aimed at Windows first and
+since ported to Linux and macOS. Thanks for the original idea
 and the core algorithms. Data-source semantics are aligned with
 [juejin-cn/juejin-usage](https://github.com/juejin-cn/juejin-usage). The desktop
 window, tray and console are built with

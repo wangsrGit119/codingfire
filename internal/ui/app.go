@@ -145,8 +145,8 @@ func newApp(syncAutoStart bool) *App {
 	core.SetLanguage(a.Settings.Language)
 	fire.SourceFlameColors.Attach(a.Settings)
 
-	// Auto-start defaults to on: push the setting into the registry, and if the
-	// write fails, sync the setting back to the real state so the tray
+	// Auto-start defaults to on: push the setting into the login entry, and if
+	// the write fails, sync the setting back to the real state so the tray
 	// checkmark cannot lie. Done before the tray is built so the menu is
 	// correct the moment it appears.
 	if syncAutoStart {
@@ -203,17 +203,20 @@ func (a *App) Run() {
 				a.buildTray()
 			}
 
-			// The Win32 backend shows the window immediately after OnInit
-			// returns. Position the HWND synchronously here, while it is still
-			// hidden, so the user never sees go-gui's default (0,0) placement.
+			// Styling and placement happen here rather than in NewApp because
+			// the native window does not exist until now. Exactly when it
+			// becomes visible differs per platform — the Win32 backend shows it
+			// as soon as OnInit returns, X11 has already mapped it — so doing
+			// both in one pass is what keeps it from ever being seen at
+			// go-gui's default (0,0).
 			a.applyPlatformTweaks()
 			if a.Settings.FlameVisible && !a.probeHidden {
 				SetWindowVisible(a.hwnd, true)
 			}
 
-			// If the saved state says hidden, hide the native window before
-			// the backend's first ShowWindow call. The window remains alive so
-			// the tray's Show action can bring it back later.
+			// If the saved state says hidden, take the native window down
+			// again. It stays alive so the tray's Show action can bring it
+			// back later.
 			if !a.Settings.FlameVisible && a.hwnd != 0 {
 				SetWindowVisible(a.hwnd, false)
 			}
@@ -689,9 +692,10 @@ func (a *App) SetAutoStart(enabled bool) {
 	a.rebuildTrayMenu()
 }
 
-// syncAutoStart pushes the setting into the registry. When the write fails
-// (group policy, permissions, a locked hive) the setting is synced back to the
-// real state — the checkmark must reflect the facts.
+// syncAutoStart pushes the setting into the platform's login entry. When the
+// write fails (group policy, permissions, a read-only config directory) the
+// setting is synced back to the real state — the checkmark must reflect the
+// facts.
 func (a *App) syncAutoStart() {
 	if core.AutoStartApply(a.Settings.AutoStart) {
 		return

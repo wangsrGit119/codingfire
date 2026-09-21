@@ -1,6 +1,8 @@
 package ui
 
-// TEMPORARY diagnostic probe. Delete after verification.
+// Diagnostic probes for cmd/ctprobe, which renders console tabs headlessly so
+// the layout can be inspected and the samples under perf-artifacts/
+// regenerated. Not part of the shipped binary.
 
 import (
 	"time"

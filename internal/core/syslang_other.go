@@ -1,22 +1,12 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package core
 
-import (
-	"os"
-	"strings"
-)
-
-// platformLanguageName is a POSIX fallback so the package still compiles and
-// behaves sensibly off Windows. The shipped app is Windows-only.
+// platformLanguageName returns the UI language as a short tag, e.g. "zh-CN".
+//
+// This is the complement of syslang_windows.go and syslang_darwin.go: on every
+// other platform the POSIX locale environment is the whole answer, so there is
+// nothing to do but read it.
 func platformLanguageName() string {
-	for _, k := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
-		v := os.Getenv(k)
-		if v == "" || v == "C" || v == "POSIX" {
-			continue
-		}
-		v = strings.SplitN(v, ".", 2)[0]
-		return strings.ReplaceAll(v, "_", "-")
-	}
-	return "en"
+	return posixLanguageName()
 }

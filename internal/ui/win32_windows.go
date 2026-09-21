@@ -109,12 +109,6 @@ type monitorInfo struct {
 	DwFlags   uint32
 }
 
-// OwnWindow is a top-level window belonging to this process.
-type OwnWindow struct {
-	Hwnd  uintptr
-	Title string
-}
-
 // enumTarget collects windows during a single EnumWindows pass.
 //
 // EnumWindows is synchronous, so a package-level slot is safe here — and it

@@ -29,10 +29,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# Pure-Go cross-compilation, so no target needs a C toolchain installed.
-env:
-  CGO_ENABLED: '0'
-
 jobs:
   verify:
     runs-on: windows-latest
@@ -94,7 +90,7 @@ jobs:
 
   # Windows legs run on a Windows runner, so the amd64 one can be *executed* and
   # its --dump header read back. That is the strongest check available and it is
-  # the platform that actually ships today.
+  # the platform that ships first.
   windows:
     needs: verify
     runs-on: windows-latest
@@ -116,6 +112,8 @@ jobs:
 
       - name: Build
         shell: pwsh
+        env:
+          CGO_ENABLED: '0'
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:GOOS   = 'windows'
@@ -164,26 +162,19 @@ jobs:
           path: ${{ matrix.asset }}-v*.zip
           if-no-files-found: error
 
-  # Everything else is cross-compiled. None of these can be run on the runner,
-  # so they get the two checks that do not need execution: the binary's recorded
-  # GOOS/GOARCH must match the label we are about to ship it under, and the
-  # version constant must be present in it.
-  #
-  # Note these are not "supported" in the same sense as the Windows build: the
-  # platform shims in win32_other.go / autostart_other.go are deliberate no-ops
-  # (no click-through, no window positioning, no autostart), so expect a degraded
-  # overlay. They are published so the platform work has somewhere to land.
-  unix:
+  # Linux is pure Go (X11 and EGL are reached through xgb + purego, no cgo), so
+  # it cross-compiles on any runner. The amd64 leg is then actually run: --dump
+  # headlessly, and the GUI under a virtual X server, which is the only place the
+  # X11 window layer is exercised.
+  linux:
     needs: verify
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { goos: linux,  goarch: amd64, asset: CodingFire-linux-x64 }
-          - { goos: linux,  goarch: arm64, asset: CodingFire-linux-arm64 }
-          - { goos: darwin, goarch: amd64, asset: CodingFire-macos-x64 }
-          - { goos: darwin, goarch: arm64, asset: CodingFire-macos-arm64 }
+          - { goarch: amd64, asset: CodingFire-linux-x64 }
+          - { goarch: arm64, asset: CodingFire-linux-arm64 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -195,47 +186,143 @@ jobs:
           cache: true
 
       - name: Build
-        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $env:GOOS   = '${{ matrix.goos }}'
-          $env:GOARCH = '${{ matrix.goarch }}'
+          mkdir -p dist
           go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
-          if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
-          Write-Host ("built {0:N0} bytes" -f (Get-Item dist/CodingFire).Length)
+          ls -l dist/CodingFire
 
-      - name: Verify the binary matches its label and version
-        shell: pwsh
+      # The virtual display needs the client-side EGL and Mesa's software
+      # rasteriser: a GitHub runner has no GPU, and llvmpipe is what the GL
+      # backend lands on there.
+      - name: Install a virtual X server and a software GL stack
+        if: matrix.goarch == 'amd64'
         run: |
-          $ver = '${{ needs.verify.outputs.version }}'
-          $goos = '${{ matrix.goos }}'
-          $goarch = '${{ matrix.goarch }}'
-          $info = (go version -m dist/CodingFire 2>&1 | Out-String)
-          Write-Host $info
-          if ($info -notmatch "GOOS=$goos") {
-            throw "the binary was not built for $goos."
-          }
-          if ($info -notmatch "GOARCH=$goarch") {
-            throw "the binary was not built for $goarch."
-          }
-          # "CodingFire " + Version is a constant expression, so the compiler folds
-          # it and the literal survives -s -w. Scanning for it catches an asset
-          # built from a tree whose version constant drifted.
-          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes('dist/CodingFire'))
-          if ($text -notmatch [regex]::Escape("CodingFire $ver")) {
-            throw "the binary does not contain 'CodingFire $ver'."
-          }
-          Write-Host "ok: $goos/$goarch, reports $ver"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils \
+            libegl1 libegl-mesa0 libgl1 libglx-mesa0 libgl1-mesa-dri \
+            libx11-6 libxext6 libxrandr2 libxcursor1 libxi6
+
+      - name: Smoke test (headless and under Xvfb)
+        if: matrix.goarch == 'amd64'
+        env:
+          GALLIUM_DRIVER: llvmpipe
+        run: |
+          chmod +x scripts/linux-smoke.sh
+          xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux-smoke.sh dist/CodingFire
+
+      # None of these can be executed on the runner, so they get the two checks
+      # that do not need execution: the binary's recorded GOOS/GOARCH must match
+      # the label we are about to ship it under, and the version constant must be
+      # present in it.
+      - name: Verify the binary matches its label and version
+        run: |
+          ver='${{ needs.verify.outputs.version }}'
+          goos='linux'
+          goarch='${{ matrix.goarch }}'
+          go version -m dist/CodingFire
+          if ! go version -m dist/CodingFire | grep -q "GOOS=$goos"; then
+            echo "the binary was not built for $goos" >&2; exit 1
+          fi
+          if ! go version -m dist/CodingFire | grep -q "GOARCH=$goarch"; then
+            echo "the binary was not built for $goarch" >&2; exit 1
+          fi
+          # "CodingFire " + Version is a constant expression, so the compiler
+          # folds it and the literal survives -s -w. Scanning for it catches an
+          # asset built from a tree whose version constant drifted.
+          if ! grep -aqF "CodingFire $ver" dist/CodingFire; then
+            echo "the binary does not contain 'CodingFire $ver'" >&2; exit 1
+          fi
+          echo "ok: $goos/$goarch, reports $ver"
 
       - name: Package
-        shell: pwsh
         run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $ver = '${{ needs.verify.outputs.version }}'
-          $asset = '${{ matrix.asset }}'
-          $zip = "$asset-v$ver.zip"
-          Compress-Archive -LiteralPath @('dist/CodingFire') -DestinationPath $zip -Force
-          Write-Host ("$zip  {0:N0} bytes" -f (Get-Item $zip).Length)
+          ver='${{ needs.verify.outputs.version }}'
+          asset='${{ matrix.asset }}'
+          zip="$asset-v$ver.zip"
+          zip -q "$zip" dist/CodingFire
+          ls -l "$zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}-v*.zip
+          if-no-files-found: error
+
+  # macOS cannot be cross-compiled: the metal backend is cgo, so both legs build
+  # on a macOS runner with CGO_ENABLED=1. That is also the only way to get a
+  # binary that does not panic on launch - built without cgo, darwin selects
+  # gui/backend/run_default.go, whose RunApp panics with "no native backend
+  # available".
+  macos:
+    needs: verify
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64, asset: CodingFire-macos-x64 }
+          - { goarch: arm64, asset: CodingFire-macos-arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+          ls -l dist/CodingFire
+
+      # --dump is headless, so unlike the GUI it can be run on the runner. It
+      # proves the binary is not merely well-formed but starts and does its job.
+      - name: Run the headless report
+        run: |
+          ./dist/CodingFire --dump "$RUNNER_TEMP/dump.txt"
+          head -3 "$RUNNER_TEMP/dump.txt"
+          ver='${{ needs.verify.outputs.version }}'
+          if ! head -1 "$RUNNER_TEMP/dump.txt" | grep -qF "$ver"; then
+            echo "the report does not name version $ver" >&2; exit 1
+          fi
+
+      - name: Verify the binary matches its label and version
+        run: |
+          ver='${{ needs.verify.outputs.version }}'
+          goos='darwin'
+          goarch='${{ matrix.goarch }}'
+          go version -m dist/CodingFire
+          if ! go version -m dist/CodingFire | grep -q "GOOS=$goos"; then
+            echo "the binary was not built for $goos" >&2; exit 1
+          fi
+          if ! go version -m dist/CodingFire | grep -q "GOARCH=$goarch"; then
+            echo "the binary was not built for $goarch" >&2; exit 1
+          fi
+          if ! grep -aqF "CodingFire $ver" dist/CodingFire; then
+            echo "the binary does not contain 'CodingFire $ver'" >&2; exit 1
+          fi
+          echo "ok: $goos/$goarch, reports $ver"
+
+      - name: Package
+        run: |
+          ver='${{ needs.verify.outputs.version }}'
+          asset='${{ matrix.asset }}'
+          zip="$asset-v$ver.zip"
+          zip -q "$zip" dist/CodingFire
+          ls -l "$zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -245,7 +332,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [verify, windows, unix]
+    needs: [verify, windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - name: Download every built asset
@@ -282,10 +369,16 @@ jobs:
             'Assets:',
             $bullets,
             '',
-            '**Windows 10 and later, x64, is the supported target.** The Linux and macOS',
-            'builds are attached so that platform work has somewhere to land, but the',
-            'platform shims are still no-ops there (no click-through, no window',
-            'positioning, no autostart), so expect a degraded overlay.',
+            '**Windows 10 and later** is the most thoroughly exercised target; the x64 zip is',
+            'the one to pick there. The Windows build needs nothing installed.',
+            '',
+            '**Linux** needs an X11 session with a compositing manager (for the transparent',
+            'window) and a StatusNotifier host for the tray - KDE, XFCE and LXQt all have one,',
+            'and GNOME needs an extension. The zip holds a single static binary.',
+            '',
+            '**macOS** is built with the native Metal backend and provides a menu-bar item.',
+            'The download is not code-signed, so Gatekeeper needs it allowed once under',
+            'System Settings > Privacy & Security.',
             '',
             'The [C#/.NET build](https://github.com/wangsrGit119/codingfire-win) remains the',
             'choice for Windows 7 and 8; this one trades that range for a self-contained',
