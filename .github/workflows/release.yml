@@ -61,9 +61,12 @@ jobs:
           Write-Host "version: $ver"
           "version=$ver" >> $env:GITHUB_OUTPUT
 
-      # Same guard as release.ps1: a Go binary carries no version resource, so the
-      # constant is read out of the source. Bump it before tagging, not after -
-      # otherwise the asset silently disagrees with the tag it is attached to.
+      # A Go binary carries no version resource, so the constant is read out of the
+      # source. This is the only place that guard lives now: the local release
+      # script that used to duplicate it is gone, because it could only build one of
+      # the six targets and raced the CI run its own tag push triggered. Bump the
+      # constant before tagging, not after - otherwise the asset silently disagrees
+      # with the tag it is attached to.
       - name: Assert internal/core/version.go declares this version
         shell: pwsh
         run: |
@@ -212,8 +215,8 @@ jobs:
         env:
           GALLIUM_DRIVER: llvmpipe
         run: |
-          chmod +x scripts/linux-smoke.sh
-          xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux-smoke.sh dist/CodingFire
+          chmod +x scripts/linux/linux-smoke.sh
+          xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux/linux-smoke.sh dist/CodingFire
 
       # None of these can be executed on the runner, so they get the two checks
       # that do not need execution: the binary's recorded GOOS/GOARCH must match

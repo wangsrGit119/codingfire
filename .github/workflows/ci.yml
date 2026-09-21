@@ -144,8 +144,8 @@ jobs:
         env:
           GALLIUM_DRIVER: llvmpipe
         run: |
-          chmod +x scripts/linux-smoke.sh
-          xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux-smoke.sh dist/CodingFire
+          chmod +x scripts/linux/linux-smoke.sh
+          xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux/linux-smoke.sh dist/CodingFire
 
   # macOS cannot be cross-compiled — the metal backend is cgo and needs the SDK —
   # so it gets its own runner. CGO_ENABLED=1 is what makes the difference between

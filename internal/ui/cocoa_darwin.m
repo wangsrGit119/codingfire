@@ -305,9 +305,23 @@ void cfWindowSetOverlayBehavior(uintptr_t win, int overlay) {
         if (overlay) {
             // A desktop overlay belongs on every Space, stays put when Spaces
             // switch, and has no business appearing in the window cycle.
+            //
+            // CanJoinAllSpaces and MoveToActiveSpace are mutually exclusive:
+            // -setCollectionBehavior: validates the pair and throws
+            // NSInternalInconsistencyException, which is an ObjC exception and
+            // so takes the whole process down rather than surfacing as an
+            // error. The backend seeds every window with MoveToActiveSpace at
+            // creation (metal_window_darwin.m, metalWindowCreate), so it has to
+            // come off before the overlay bits go on - otherwise the app dies
+            // on the first frame, with a crash that points at AppKit instead of
+            // at us.
+            b &= ~NSWindowCollectionBehaviorMoveToActiveSpace;
             b |= flags;
         } else {
+            // Dropping the overlay restores the backend's creation default, so
+            // a window that stops being an overlay behaves like any other.
             b &= ~flags;
+            b |= NSWindowCollectionBehaviorMoveToActiveSpace;
         }
         [target setCollectionBehavior:b];
     });

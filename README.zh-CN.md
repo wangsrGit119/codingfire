@@ -88,10 +88,31 @@ CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # macOS
 go vet ./... && go test ./...
 ```
 
-版本号只有一处出处：`internal/core/version.go`。推一个 tag，
-[CI](../../actions/workflows/release.yml) 就会构建、打包并发布全部六个目标 —— 版本号与 tag
-不一致会直接中止，任何一个平台编不过则**在往 release 挂任何东西之前**失败。Windows 那一半
-也可以在本地用 `build.ps1` / `release.ps1` 做。
+`scripts/` 下按平台各有一个包装脚本，平时直接跑它就行 —— 会固定构建参数、先跑 vet，
+并报出源码里声明的版本号：
+
+```bash
+scripts/macos/build.sh                 # 构建，另有 --run / --dump / --render
+scripts/macos/build.sh --check         # 构建后无头验证它能起来
+scripts/macos/build.sh --universal     # 合成 arm64 + x86_64 单文件
+```
+
+版本号只有一处出处：`internal/core/version.go`。发版完全交给
+[CI](../../actions/workflows/release.yml)，**故意不提供本地发版脚本** —— 本地只能构建六个
+目标里的一个，还会跟它自己刚触发的 CI 抢同一个 release。发版流程：
+
+```bash
+# 先改 internal/core/version.go 里的常量并提交，然后：
+git tag -a v1.0.4 -m "CodingFire v1.0.4"
+git push origin v1.0.4
+```
+
+CI 会拿 tag 去核对 `version.go`、构建并测试全部六个目标、逐个确认二进制报出的版本号正确，
+任何一个平台编不过就**在往 release 挂任何东西之前**失败。版本号对不上时，改正常量、删掉
+tag、重新推一次即可。
+
+本地构建用 `scripts/windows/build.ps1`；CI 里跑的是 `scripts/linux/linux-smoke.sh`，
+用它在虚拟显示下验证 X11 窗口层。
 
 `third_party/go-gui` 与 `third_party/go-glyph` 是打过补丁的 fork，通过 `go.mod` 的
 `replace` 指向本地目录，**故意提交进仓库**，这样 clone 下来不用联网就能构建。

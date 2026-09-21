@@ -100,10 +100,35 @@ CGO_ENABLED=1 go build -trimpath -ldflags '-s -w' -o dist/CodingFire .   # macOS
 go vet ./... && go test ./...
 ```
 
-The version lives in one place, `internal/core/version.go`. Pushing a tag makes
-[CI](../../actions/workflows/release.yml) build, package and publish all six targets
-- it aborts if `version.go` does not match the tag, and publishes nothing unless
-every platform built. `build.ps1` and `release.ps1` do the Windows half locally.
+`scripts/` holds a per-platform wrapper around those commands, which is what you
+normally want to run - each one pins the flags, vets first, and reports the version
+the source claims:
+
+```bash
+scripts/macos/build.sh                 # build, plus --run / --dump / --render
+scripts/macos/build.sh --check         # build, then prove it starts (headless)
+scripts/macos/build.sh --universal     # one fat arm64 + x86_64 binary
+```
+
+The version lives in one place, `internal/core/version.go`. Releasing is entirely
+[CI](../../actions/workflows/release.yml)'s job, and there is no local release script
+on purpose — it would build one target where CI builds six, and race the run it just
+triggered. To cut a release:
+
+```bash
+# bump the constant in internal/core/version.go, commit it, then:
+git tag -a v1.0.4 -m "CodingFire v1.0.4"
+git push origin v1.0.4
+```
+
+CI verifies `version.go` against the tag, builds and tests all six targets, checks
+each binary reports the right version, and publishes nothing unless every platform
+built. A mismatch fails the run before anything is published — fix the constant,
+delete the tag, and push it again.
+
+Locally, `scripts/windows/build.ps1` does the Windows build and
+`scripts/linux/linux-smoke.sh` is what CI runs to exercise the X11 window layer under
+a virtual display.
 
 `third_party/go-gui` and `third_party/go-glyph` are patched forks wired in with
 `replace` directives, committed on purpose so a clone builds offline. **Re-check each

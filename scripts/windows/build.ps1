@@ -13,6 +13,11 @@
 #   -Dump     build, then write the local-usage report
 #   -Render   build, then write the pixel-art preview PNGs
 #
+# Usage (run from the repo root, or anywhere - paths are resolved from
+# $PSScriptRoot, not from the caller's working directory):
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1 -Run
+#
 # Target: Windows 10 and later, x64. Go dropped Windows 7/8 support in 1.21, so
 # this build cannot serve the Win7 SP1 range - that is what the C# build in the
 # sibling repository is for. The two are meant to coexist.
@@ -38,7 +43,11 @@ foreach ($v in @('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY')) {
     [System.Environment]::SetEnvironmentVariable($v, $null)
 }
 
-$root    = $PSScriptRoot
+# This file lives in scripts\windows\, so the repository root is two levels up.
+# Resolving it from $PSScriptRoot rather than from the caller's working directory
+# is what lets the script be run from anywhere: launched from C:\ it would
+# otherwise look for dist\ and internal\ next to C:\ instead of next to the repo.
+$root    = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $distDir = Join-Path $root 'dist'
 $exePath = Join-Path $distDir 'CodingFire.exe'
 $tmp     = [System.IO.Path]::GetTempPath()
@@ -178,9 +187,9 @@ Write-Host "built    : $exePath ($sizeKb KB)" -ForegroundColor Green
 #
 # The version lives in exactly one place (internal\core\version.go), and a Go
 # binary has no version resource to read it back from - so it is read from the
-# source. release.ps1 asserts the same constant against the tag it is about to
-# create, which is what stops "forgot to bump the version" from reaching a user
-# who then reports a bug against the wrong build.
+# source. The release workflow's verify job asserts the same constant against the
+# tag being released, which is what stops "forgot to bump the version" from
+# reaching a user who then reports a bug against the wrong build.
 # ---------------------------------------------------------------------------
 $verFile = Join-Path $root 'internal\core\version.go'
 $ver = ''

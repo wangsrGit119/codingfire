@@ -8,9 +8,11 @@
 # assertion, and the assertion is positive: the app announces the placement only
 # after all three have succeeded. See the wait_for_log call below.
 #
-# Run it under a virtual X server:
+# Run it from the repo root under a virtual X server. The binary argument is
+# resolved against the caller's working directory, not against this script, so
+# the relative path below is what the CI jobs pass:
 #
-#   xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux-smoke.sh dist/CodingFire
+#   xvfb-run -a -s "-screen 0 1280x800x24" scripts/linux/linux-smoke.sh dist/CodingFire
 #
 # The headless half needs no display at all and is worth running on its own.
 
