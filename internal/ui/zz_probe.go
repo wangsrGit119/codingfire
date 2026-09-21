@@ -244,7 +244,18 @@ func ProbeStatsInputs() string {
 		}
 	}
 	b := a.Monitor.TodayBreakdown()
-	return "total=" + itoaInt(a.Monitor.TodayTokens()) +
+
+	// The model list is the point of this probe when the question is whether
+	// model names survive the whole trip from log to console.
+	models := a.Monitor.TodayByModel()
+	names := make([]string, 0, len(models))
+	for name, tokens := range models {
+		names = append(names, name+"="+itoaInt(tokens))
+	}
+	sort.Strings(names)
+
+	return "models=" + itoaInt(len(models)) + " [" + strings.Join(names, " ") + "]" +
+		" total=" + itoaInt(a.Monitor.TodayTokens()) +
 		" hours=" + itoaInt(len(h)) + " nonZeroHours=" + itoaInt(nonzero) +
 		" hourMax=" + itoaInt(hourMax(h)) + " peak=" + itoaInt(peakHour(h)) +
 		" input=" + itoaInt(derefInt(b.Input)) + " output=" + itoaInt(derefInt(b.Output)) +

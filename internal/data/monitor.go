@@ -99,6 +99,7 @@ type UsageMonitor struct {
 	statuses       []core.SourceStatus
 	todayTokens    int
 	todayBySource  map[core.UsageSource]int
+	todayByModel   map[string]int
 	todayHourly    []core.HourlyUsage
 	todayBreakdown core.UsageBreakdown
 	lastEvent      core.UsageEvent
@@ -116,6 +117,7 @@ func NewUsageMonitor(store *UsageStore) *UsageMonitor {
 		adapters:      DefaultAdapters(),
 		bestTotals:    map[core.UsageSource]map[string]int{},
 		todayBySource: map[core.UsageSource]int{},
+		todayByModel:  map[string]int{},
 		todayHourly:   emptyHourly(),
 		stopCh:        make(chan struct{}),
 	}
@@ -144,6 +146,18 @@ func (m *UsageMonitor) TodayBySource() map[core.UsageSource]int {
 	defer m.statsGate.Unlock()
 	out := make(map[core.UsageSource]int, len(m.todayBySource))
 	for k, v := range m.todayBySource {
+		out[k] = v
+	}
+	return out
+}
+
+// TodayByModel returns today's per-model split. Only events that named a model
+// are counted, so this does not necessarily add up to TodayTokens.
+func (m *UsageMonitor) TodayByModel() map[string]int {
+	m.statsGate.Lock()
+	defer m.statsGate.Unlock()
+	out := make(map[string]int, len(m.todayByModel))
+	for k, v := range m.todayByModel {
 		out[k] = v
 	}
 	return out
@@ -188,6 +202,7 @@ func (m *UsageMonitor) Start() {
 	m.statsGate.Lock()
 	m.statuses = buildStatuses()
 	m.todayBySource = map[core.UsageSource]int{}
+	m.todayByModel = map[string]int{}
 	m.todayHourly = emptyHourly()
 	m.todayBreakdown = core.UsageBreakdown{}
 	m.statsGate.Unlock()
@@ -645,6 +660,7 @@ func (m *UsageMonitor) ReloadStats() {
 	m.statsGate.Lock()
 	m.todayTokens = totals.Total
 	m.todayBySource = totals.BySource
+	m.todayByModel = totals.ByModel
 	m.todayHourly = hourly
 	m.todayBreakdown = breakdown
 	m.statsGate.Unlock()

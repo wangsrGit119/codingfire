@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -230,6 +231,24 @@ func (appInfo) DisplayName() string { return "CodingFire " + Version }
 // tray menu item and the console About tab read it — do not inline the URL in
 // either place.
 func (appInfo) ProjectUrl() string { return "https://github.com/wangsrGit119/codingfire" }
+
+// PlatformName names the system this build runs on, for the About tab.
+//
+// It exists because the tab said "Windows" outright, which was true of the
+// first build and has been wrong on two platforms ever since. A product name is
+// not translated, so this is not an L10n key.
+func (appInfo) PlatformName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "Windows"
+	case "darwin":
+		return "macOS"
+	case "linux":
+		return "Linux"
+	default:
+		return runtime.GOOS
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Settings

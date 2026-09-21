@@ -114,6 +114,9 @@ type App struct {
 	// than a bool so a request that never materialises — the backend refusing
 	// the window, say — cannot wedge the menu item forever.
 	consolePendingAt time.Time
+	// overlayNoticedAt is when guardOverlay last reported a repair, so a window
+	// that stays covered cannot fill the log one line per second.
+	overlayNoticedAt time.Time
 
 	quitting bool
 	stopCh   chan struct{}
@@ -331,6 +334,7 @@ func (a *App) tickLoop() {
 				// startup would otherwise be the only chance it ever got.
 				a.ensurePlaced()
 				a.pollPosition()
+				a.guardOverlay()
 			}
 		}
 	}
@@ -426,17 +430,59 @@ func (a *App) flameHwnd() uintptr {
 	a.mu.Lock()
 	hwnd := a.hwnd
 	a.mu.Unlock()
-	if hwnd != 0 {
+	// The cached handle is only trusted while it still refers to a window.
+	// go-gui destroys windows without telling the app, and a stale handle is
+	// worse than none: every call that used it would operate on nothing, and
+	// the lookup that could have found the replacement would never run.
+	if hwnd != 0 && WindowAlive(hwnd) {
 		return hwnd
 	}
 	hwnd = FindOwnWindowByTitle(FlameWindowTitle)
-	if hwnd != 0 {
-		a.mu.Lock()
-		a.hwnd = hwnd
-		a.mu.Unlock()
-	}
+	a.mu.Lock()
+	a.hwnd = hwnd
+	a.mu.Unlock()
 	return hwnd
 }
+
+// guardOverlay repairs the campfire's window if it has been covered, hidden or
+// minimised, and says so at most once a minute.
+//
+// The campfire is meant to sit above everything, and nothing but this makes
+// that true after startup: always-on-top is the front of a band, and a later
+// always-on-top window takes the front from us. A window that has fallen behind
+// one looks exactly like a campfire that is gone, which is what the user
+// reported. Silence is deliberate for the steady state — reporting every second
+// would write 86,000 log lines a day for a window that stays covered.
+func (a *App) guardOverlay() {
+	hwnd := a.flameHwnd()
+	if hwnd == 0 {
+		return
+	}
+	visible := a.Settings.FlameVisible && !a.probeHidden
+	alive, reason := GuardOverlayWindow(hwnd, visible)
+	if alive && reason == "" {
+		a.mu.Lock()
+		a.overlayNoticedAt = time.Time{}
+		a.mu.Unlock()
+		return
+	}
+	if !alive {
+		reason = "window is gone; it cannot be brought back without a restart"
+	}
+
+	a.mu.Lock()
+	quiet := !a.overlayNoticedAt.IsZero() && time.Since(a.overlayNoticedAt) < overlayNoticeQuiet
+	if !quiet {
+		a.overlayNoticedAt = time.Now()
+	}
+	a.mu.Unlock()
+	if !quiet {
+		core.LogWarn("campfire " + reason)
+	}
+}
+
+// overlayNoticeQuiet is how long guardOverlay stays quiet after reporting.
+const overlayNoticeQuiet = time.Minute
 
 func ceilF(v float64) float64 {
 	i := float64(int(v))
@@ -1293,6 +1339,9 @@ type HoverModel struct {
 	UpdatedAt       core.Time
 	HasUpdated      bool
 	Rows            []HoverRow
+	// Hourly is today's 24 buckets, drawn as the mini timeline. Always the
+	// full day, not a window: the point is the shape of today.
+	Hourly []core.HourlyUsage
 }
 
 // HoverRow is one source line on the hover card.
@@ -1311,6 +1360,7 @@ func (a *App) BuildHoverModel() HoverModel {
 		TodayTokens:     a.Monitor.TodayTokens(),
 		TokensPerSecond: rate,
 		ShowLiveRate:    a.Settings.ShowLiveRate,
+		Hourly:          a.Monitor.TodayHourly(),
 	}
 
 	for _, st := range a.Monitor.Statuses() {

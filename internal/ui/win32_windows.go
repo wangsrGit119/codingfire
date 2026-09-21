@@ -26,6 +26,8 @@ var (
 	procGetWindowThreadProcessID = user32.NewProc("GetWindowThreadProcessId")
 	procIsWindow                 = user32.NewProc("IsWindow")
 	procIsWindowVisible          = user32.NewProc("IsWindowVisible")
+	procIsIconic                 = user32.NewProc("IsIconic")
+	procGetWindow                = user32.NewProc("GetWindow")
 	procSetWindowPos             = user32.NewProc("SetWindowPos")
 	procGetWindowLongPtrW        = user32.NewProc("GetWindowLongPtrW")
 	procSetWindowLongPtrW        = user32.NewProc("SetWindowLongPtrW")
@@ -71,6 +73,10 @@ const (
 	// WS_EX_TOOLWINDOW keeps a window out of Alt+Tab and the taskbar. The C#
 	// build's LayeredWindow set it on both the campfire and its hover card.
 	wsExToolWindow = 0x00000080
+	wsExTopmost    = 0x00000008
+
+	// gwHwndPrev is the window directly above the given one in the Z order.
+	gwHwndPrev = 3
 
 	// ShowWindow commands. SW_SHOWNOACTIVATE shows without stealing focus,
 	// which is what a card the user is only hovering over needs.
@@ -253,6 +259,91 @@ func ApplyOverlayStyles(hwnd uintptr, topMost, clickThrough bool) bool {
 		return false
 	}
 	return true
+}
+
+// IsTopMost reports whether the window carries WS_EX_TOPMOST.
+func IsTopMost(hwnd uintptr) bool {
+	return hwnd != 0 && windowExStyle(hwnd)&wsExTopmost != 0
+}
+
+// topMostCovered reports whether another always-on-top window sits in front of
+// hwnd and overlaps it.
+//
+// Always-on-top is not a single layer but a bands: every window in it is above
+// every ordinary window, and within the band whoever called SetWindowPos with
+// HWND_TOPMOST last is in front. Nothing moves a window back to the front of
+// that band on its own, so a campfire that spent its whole life above
+// everything ends up behind the next always-on-top utility the user opens, and
+// stays there.
+//
+// The walk hinges on one property of the band: a non-topmost window cannot
+// cover a topmost one, so the search can stop at the first non-topmost
+// neighbour instead of enumerating every window on the desktop. It compares
+// rectangles rather than hit-testing because the campfire is click-through —
+// a hit test at the campfire's own position reports whatever is underneath it.
+func topMostCovered(hwnd uintptr) bool {
+	ourX, ourY, ourW, ourH, ok := WindowRect(hwnd)
+	if !ok || ourW <= 0 || ourH <= 0 {
+		return false
+	}
+
+	prev, _, _ := procGetWindow.Call(hwnd, gwHwndPrev)
+	for prev != 0 && IsTopMost(prev) {
+		if r, _, _ := procIsWindowVisible.Call(prev); r != 0 {
+			if x, y, w, h, ok := WindowRect(prev); ok {
+				if x < ourX+ourW && x+w > ourX && y < ourY+ourH && y+h > ourY {
+					return true
+				}
+			}
+		}
+		prev, _, _ = procGetWindow.Call(prev, gwHwndPrev)
+	}
+	return false
+}
+
+// GuardOverlayWindow repairs the states an overlay window can be left in after
+// it has started, and reports what it had to fix.
+//
+// Two of them stick forever without this. A window another program minimised —
+// "show desktop" does it to every window — stays minimised, because the only
+// thing in this program that hides the campfire is the user's own toggle, so
+// nothing ever brings it back. And a window that lost the front of the topmost
+// band stays behind whatever displaced it. Both look identical from the desk:
+// the campfire was there a minute ago and now it is not.
+//
+// alive is false when the handle no longer refers to a window. reason is a
+// short phrase naming what was repaired, or "" when nothing was wrong; the
+// caller decides how loudly to say so, because a window that stays covered
+// would otherwise produce a warning every second.
+//
+// wantVisible is the user's own setting, so a campfire they hid on purpose is
+// left hidden.
+func GuardOverlayWindow(hwnd uintptr, wantVisible bool) (alive bool, reason string) {
+	if !WindowAlive(hwnd) {
+		return false, ""
+	}
+	if !wantVisible {
+		return true, ""
+	}
+
+	if i, _, _ := procIsIconic.Call(hwnd); i != 0 {
+		procShowWindow.Call(hwnd, swShowNoActivate)
+		return true, "was minimised"
+	}
+	if !WindowVisible(hwnd) {
+		procShowWindow.Call(hwnd, swShowNoActivate)
+		return true, "had been hidden"
+	}
+	if !IsTopMost(hwnd) {
+		if SetTopMost(hwnd, true) {
+			return true, "had lost its always-on-top flag"
+		}
+		return true, ""
+	}
+	if topMostCovered(hwnd) && SetTopMost(hwnd, true) {
+		return true, "had been covered by another always-on-top window"
+	}
+	return true, ""
 }
 
 // SetWindowVisible shows or hides a window without activating it.

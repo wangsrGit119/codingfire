@@ -689,7 +689,37 @@ func (a *claudeCodeAdapter) ParseLine(line, filePath string) (core.UsageEvent, b
 // Codex — ~/.codex/sessions/**/*.jsonl where type == "token_usage_record"
 // ---------------------------------------------------------------------------
 
-type codexAdapter struct{ baseAdapter }
+type codexAdapter struct {
+	baseAdapter
+
+	// lastModel remembers, per log file, the model named by the most recent
+	// turn_context. Codex states the model in a record of its own rather than
+	// on the token_usage_record, so the two can only be associated through
+	// reading order: turn_context comes first, the records it covers follow.
+	//
+	// No lock, because the monitor runs one scan at a time (the scanInFlight
+	// CAS in EnqueueScan) and ReadNewJSONL hands a file's lines to ParseLine in
+	// order. A cold start that resumes mid-file has no model until the next
+	// turn_context, which the next turn produces — so the gap is one turn wide,
+	// not permanent.
+	lastModel map[string]string
+}
+
+// codexModelCacheMax bounds lastModel. Log files rotate daily and a cap this
+// size is never reached in practice; it exists so a long-running process
+// cannot grow the map without limit. Clearing outright costs at most one turn
+// of model names.
+const codexModelCacheMax = 1024
+
+func (a *codexAdapter) rememberModel(filePath, model string) {
+	if model == "" || filePath == "" {
+		return
+	}
+	if a.lastModel == nil || len(a.lastModel) >= codexModelCacheMax {
+		a.lastModel = make(map[string]string, 8)
+	}
+	a.lastModel[filePath] = model
+}
 
 func newCodexAdapter() *codexAdapter {
 	root := ""
@@ -698,7 +728,7 @@ func newCodexAdapter() *codexAdapter {
 	} else {
 		root = combinePath(core.AppPaths.Home(), ".codex", "sessions")
 	}
-	return &codexAdapter{baseAdapter{root: root}}
+	return &codexAdapter{baseAdapter: baseAdapter{root: root}}
 }
 
 func (a *codexAdapter) DiscoverLogFiles(since time.Time) []string {
@@ -710,7 +740,23 @@ func (a *codexAdapter) ParseLine(line, filePath string) (core.UsageEvent, bool) 
 		return core.UsageEvent{}, false
 	}
 	obj, ok := parseJObj(line)
-	if !ok || obj.Str("type") != "token_usage_record" {
+	if !ok {
+		return core.UsageEvent{}, false
+	}
+
+	switch obj.Str("type") {
+	case "token_usage_record":
+		// The one this adapter is here for; handled below.
+	case "turn_context":
+		// Not usage, but the model lives here — and it comes before the
+		// records it applies to, which is what makes the association work.
+		a.rememberModel(filePath, obj.Obj("payload").Str("model"))
+		return core.UsageEvent{}, false
+	case "event_msg":
+		// Older builds state the model on the thread settings instead.
+		a.rememberModel(filePath, obj.Obj("payload").Obj("thread_settings").Str("model"))
+		return core.UsageEvent{}, false
+	default:
 		return core.UsageEvent{}, false
 	}
 
@@ -769,6 +815,7 @@ func (a *codexAdapter) ParseLine(line, filePath string) (core.UsageEvent, bool) 
 			CacheRead:  optPtr(cacheRead, hasCacheRead),
 			CacheWrite: optPtr(cacheWrite, hasCacheWrite),
 		},
+		Model:    a.lastModel[filePath],
 		FilePath: filePath,
 	}, true
 }
@@ -1150,6 +1197,9 @@ func (a *ampAdapter) ParseThread(filePath string) []core.UsageEvent {
 				CacheRead:  posPtr(cacheRead),
 				CacheWrite: posPtr(cacheWrite),
 			},
+			// Amp already had the model in hand — it was going into the id and
+			// nowhere else.
+			Model:    model,
 			FilePath: filePath,
 		})
 	}

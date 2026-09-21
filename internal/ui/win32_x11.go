@@ -373,6 +373,30 @@ func ApplyOverlayWindowStyles(title string, topMost, clickThrough bool) uintptr 
 	return hwnd
 }
 
+// GuardOverlayWindow re-asserts the campfire's always-on-top hint and restores
+// a window something else hid.
+//
+// X11 has no Z-order query — stacking belongs to the window manager — so this
+// cannot tell that another always-on-top window has displaced the campfire the
+// way the Windows version can. It re-sends _NET_WM_STATE_ABOVE instead, which a
+// window manager that already has the state set ignores, and that costs one
+// client message a second.
+func GuardOverlayWindow(hwnd uintptr, wantVisible bool) (bool, string) {
+	if !WindowAlive(hwnd) {
+		return false, ""
+	}
+	if !wantVisible {
+		return true, ""
+	}
+	if !WindowVisible(hwnd) {
+		SetWindowVisible(hwnd, true)
+		SetTopMost(hwnd, true)
+		return true, "had been hidden"
+	}
+	SetTopMost(hwnd, true)
+	return true, ""
+}
+
 // SetWindowVisible shows or hides a window.
 //
 // Unmapping a managed window makes the window manager withdraw it, and mapping

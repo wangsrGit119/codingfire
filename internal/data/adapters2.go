@@ -178,7 +178,10 @@ func (a *workBuddyAdapter) ParseLine(line, filePath string) (core.UsageEvent, bo
 		Timestamp: ts,
 		Tokens:    tok.total(),
 		Breakdown: tok.breakdown(),
-		FilePath:  filePath,
+		// On every line that carries rawUsage, providerData also names the
+		// model — checked against a live log rather than assumed.
+		Model:    provider.Str("model"),
+		FilePath: filePath,
 	}, true
 }
 
@@ -948,12 +951,19 @@ func (a *copilotAdapter) ParseLine(line, filePath string) (core.UsageEvent, bool
 	// One shutdown can carry several models. This app does not split its
 	// accounting by model, so they are merged into a single event — ParseLine
 	// can only return one, and returning early would drop the other models.
+	//
+	// The merge is also why the model name is kept only when there was exactly
+	// one: attributing a multi-model total to whichever key happened to come
+	// first would be a guess wearing the costume of data.
 	var sumInput, sumOutput, sumRead, sumWrite int
+	onlyModel, usedModels := "", 0
 	for _, model := range metrics.Keys() {
 		u, ok := objField(metrics.Obj(model), "usage")
 		if !ok {
 			continue
 		}
+		usedModels++
+		onlyModel = model
 		inRaw := nonNeg(u.Raw("inputTokens"))
 		cRead := nonNeg(u.Raw("cacheReadTokens"))
 		sumInput += max(0, inRaw-cRead)
@@ -972,12 +982,17 @@ func (a *copilotAdapter) ParseLine(line, filePath string) (core.UsageEvent, bool
 		ts = time.Now()
 	}
 
+	if usedModels != 1 {
+		onlyModel = ""
+	}
+
 	return core.UsageEvent{
 		ID:        "copilot:" + sessionID + "|shutdown|" + stamp,
 		Source:    core.Copilot,
 		Timestamp: ts,
 		Tokens:    tok.total(),
 		Breakdown: tok.breakdown(),
+		Model:     onlyModel,
 		FilePath:  filePath,
 	}, true
 }

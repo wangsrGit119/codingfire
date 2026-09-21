@@ -70,9 +70,15 @@ const consoleOpenTimeout = 3 * time.Second
 //
 // Measured, not guessed: `ctprobe layout` renders each tab headlessly at a
 // given window size and reports whether go-gui decided to show either bar.
+// The height is the same kind of measurement: the stats tab stacks four
+// sections in its right-hand column and a fifth (the per-model split) once any
+// source has named a model, and 760 left it 11 px short — which shows up as a
+// vertical scrollbar on the tab the console opens on. 820 covers the sections
+// at their row caps; heavier data scrolls the tab, which is what a scrollable
+// region is for.
 const (
 	consoleWindowW = 1160
-	consoleWindowH = 760
+	consoleWindowH = 820
 )
 
 // OpenConsole shows the console, or raises the open one and switches tab.
@@ -310,13 +316,17 @@ func statTimelineGradient(dim bool) *gui.GradientDef {
 // fixed-width window, so a fixed track is the honest way to get an accurate
 // bar length.
 const (
-	statCardPad   = 8
-	statCardGap   = 5
-	statLabelW    = 104
-	statBarW      = 224
-	statValueW    = 112
-	statPercentW  = 58
-	statNameW     = 146
+	statCardPad  = 8
+	statCardGap  = 5
+	statLabelW   = 104
+	statBarW     = 224
+	statValueW   = 112
+	statPercentW = 58
+	statNameW    = 146
+	// statNameRunes is the character budget that fits statNameW at the 12 px
+	// the name cells use; names longer than this are truncated so they cannot
+	// widen the card.
+	statNameRunes = 20
 	statBarH      = 9
 	statBarRadius = 4
 	hourChartH    = 72
@@ -346,6 +356,15 @@ func statsTab(s *consoleState) []gui.View {
 	right := []gui.View{
 		statsSectionHeader(core.T("stats.breakdown"), theme),
 		statsCard(breakdownRows(breakdown, total)),
+	}
+
+	// Only shown when something actually named a model: an empty card here
+	// would imply the tools report one and simply had nothing to say.
+	if byModel := a.Monitor.TodayByModel(); len(byModel) > 0 {
+		right = append(right,
+			statsSectionHeader(core.T("stats.byModel"), theme),
+			statsCard(modelBars(byModel)),
+		)
 	}
 
 	// The per-source and timeline sections are hidden rather than shown empty:
@@ -544,15 +563,22 @@ func recentEventRows(a *App) []gui.View {
 		if breakdown == "" {
 			breakdown = "token event"
 		}
+		// An em dash for a record whose source never named a model, so the
+		// column lines up instead of jumping.
+		model := e.Model
+		if model == "" {
+			model = "—"
+		}
 		rows = append(rows, gui.Row(gui.ContainerCfg{
 			Sizing:  gui.FillFit,
 			Spacing: gui.SomeF(8),
 			Padding: gui.PadAll(1),
 			Content: []gui.View{
-				cell(62, styled(timeText, statStyle(11, statFaint, false))),
-				flexCell(styled(source, statStyle(12, statDim, false))),
-				cell(112, rightAligned(core.Compact(int64(e.Tokens)), statStyle(12, statBright, true))),
-				cell(128, rightAligned(breakdown, statStyle(10, statFaint, false))),
+				cell(58, styled(timeText, statStyle(11, statFaint, false))),
+				cell(124, styled(source, statStyle(12, statDim, false))),
+				flexCell(styled(truncateRunes(model, 18), statStyle(11, statFaint, false))),
+				cell(88, rightAligned(core.Compact(int64(e.Tokens)), statStyle(12, statBright, true))),
+				cell(120, rightAligned(breakdown, statStyle(10, statFaint, false))),
 			},
 		}))
 	}
@@ -737,6 +763,75 @@ func sourceBars(bySource map[core.UsageSource]int) []gui.View {
 	return out
 }
 
+// modelBars renders today's tokens per model, longest bar first.
+//
+// One accent colour for every row, unlike the per-source bars: a model is not
+// an identity the app can colour-code, and the flame is single-coloured by
+// design anyway. Rows are capped because a machine that has tried many models
+// would otherwise push the card past the window.
+func modelBars(byModel map[string]int) []gui.View {
+	type entry struct {
+		model  string
+		tokens int
+	}
+	list := make([]entry, 0, len(byModel))
+	max := 0
+	for model, tokens := range byModel {
+		if tokens <= 0 {
+			continue
+		}
+		list = append(list, entry{model, tokens})
+		if tokens > max {
+			max = tokens
+		}
+	}
+	// Descending; insertion sort keeps it dependency-free and the list is short.
+	for i := 1; i < len(list); i++ {
+		for j := i; j > 0 && list[j].tokens > list[j-1].tokens; j-- {
+			list[j], list[j-1] = list[j-1], list[j]
+		}
+	}
+	if len(list) > 6 {
+		list = list[:6]
+	}
+
+	out := make([]gui.View, 0, len(list))
+	for _, e := range list {
+		out = append(out, gui.Row(gui.ContainerCfg{
+			Sizing:  gui.FillFit,
+			Spacing: gui.SomeF(8),
+			Padding: gui.NoPadding,
+			Content: []gui.View{
+				cell(statNameW, gui.Text(gui.TextCfg{
+					Text:      truncateRunes(e.model, statNameRunes),
+					TextStyle: statStyle(12, statDim, false),
+				})),
+				statBar(float64(e.tokens)/float64(max), statBarW, statAmber, statTrack),
+				cell(statValueW, rightAligned(
+					core.Compact(int64(e.tokens)), statStyle(12, statBright, false))),
+			},
+		}))
+	}
+	return out
+}
+
+// truncateRunes shortens a name to fit a fixed-width cell.
+//
+// go-gui sizes a text to its content and the console is laid out at fixed
+// widths, so an over-long model name would widen the whole tab rather than
+// clip. Truncation in runes rather than bytes keeps a CJK or emoji model alias
+// from being cut mid-character.
+func truncateRunes(s string, max int) string {
+	if max <= 1 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
+}
+
 // statBarRow is a labelled bar with an absolute value and a share of the scale.
 func statBarRow(label string, tokens, scale int, fill gui.Color) gui.View {
 	fraction := 0.0
@@ -856,13 +951,7 @@ func hourlyChart(hours []core.HourlyUsage) []gui.View {
 	// with the bars they belong to.
 	axis := make([]gui.View, 0, len(hours))
 	for _, h := range hours {
-		label := ""
-		if h.Hour%3 == 0 {
-			label = strconv.Itoa(h.Hour)
-			if h.Hour < 10 {
-				label = "0" + label
-			}
-		}
+		label := hourLabel(h.Hour)
 		axis = append(axis, gui.Column(gui.ContainerCfg{
 			ID:      "console.stats.tick." + strconv.Itoa(h.Hour),
 			Sizing:  gui.FixedFit,
@@ -895,6 +984,22 @@ func hourlyChart(hours []core.HourlyUsage) []gui.View {
 			Content: axis,
 		}),
 	}
+}
+
+// hourLabel is the axis text for one hour, or "" for the hours between ticks.
+//
+// Every third hour, matching the C# chart's i % 3 == 0 rule, and zero-padded so
+// the labels are all the same width. Both timelines read from it, so the console
+// and the hover card cannot drift into labelling different hours.
+func hourLabel(hour int) string {
+	if hour%3 != 0 {
+		return ""
+	}
+	text := strconv.Itoa(hour)
+	if hour < 10 {
+		text = "0" + text
+	}
+	return text
 }
 
 func hourMax(hours []core.HourlyUsage) int {
@@ -1330,7 +1435,7 @@ func aboutTab(s *consoleState) []gui.View {
 
 	// The block order is the C# build's, so the two read identically.
 	lines := []string{
-		core.T("app.name") + " " + core.Version + "  ·  Windows",
+		core.T("app.name") + " " + core.Version + "  ·  " + core.AppInfo.PlatformName(),
 		core.T("app.tagline"),
 		core.T("about.origin"),
 		core.T("about.sources"),

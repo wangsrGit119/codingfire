@@ -231,11 +231,22 @@ func deref(p *int) int {
 
 // UsageEvent is one token-consuming record read from a local log.
 type UsageEvent struct {
-	ID          string
-	Source      UsageSource
-	Timestamp   Time // local time
-	Tokens      int
-	Breakdown   UsageBreakdown
+	ID        string
+	Source    UsageSource
+	Timestamp Time // local time
+	Tokens    int
+	Breakdown UsageBreakdown
+	// Model is the model the tokens were billed to, e.g. "gpt-6-astra". It is
+	// optional and often empty: only some tools write a model next to the
+	// token counters, and for the rest the field stays "" rather than being
+	// guessed from the tool's name. Empty means "not stated", not "unknown
+	// model" — the console reports the two the same way, because inventing a
+	// value would be worse than admitting there is none.
+	//
+	// It is deliberately not part of ID: ids are already on disk, and folding
+	// the model into them would make every existing row look like a new event
+	// and double-count the history.
+	Model       string
 	FilePath    string
 	IsEstimated bool
 }

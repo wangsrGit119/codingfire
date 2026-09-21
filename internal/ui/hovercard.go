@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"math"
+	"strconv"
+
 	"github.com/go-gui-org/go-glyph"
 	"github.com/go-gui-org/go-gui/gui"
 	"github.com/go-gui-org/go-gui/gui/backend/soft"
@@ -31,26 +34,156 @@ const (
 	hoverCardRowSize    = 12
 	hoverCardFooterSize = 10
 
-	hoverCardTitleH  = 15
-	hoverCardBigH    = 30
+	// These three are the heights go-gui actually lays the text out in, not the
+	// C# painter's point sizes. They were measured from the rendered card: a
+	// 25 px glyph box is 35 px tall, not the 30 px the point size suggests, and
+	// the C# numbers left the card's content 7 px taller than the surface
+	// hoverCardHeight asked for — so the bottom edge was being clipped all
+	// along, on the go-gui renderer only.
+	//
+	// Both renderers read them, so the Windows painter's DrawText rects grew by
+	// the same 8 px. That is the point: the card is one picture drawn two ways,
+	// and only the go-gui one can silently overflow.
+	hoverCardTitleH  = 18
+	hoverCardBigH    = 35
 	hoverCardBigGap  = 10
 	hoverCardRowsGap = 6
-	hoverCardFooterH = 17
+	hoverCardFooterH = 15
+	// The root's 1 px border sits inside its padding, so it costs a pixel at
+	// each end of the card.
+	hoverCardBorder = 1
+
+	// The mini timeline that sits between the headline number and the source
+	// rows. Deliberately short: it is a shape to glance at, and the console has
+	// the labelled version. The gap above it matches the headline's, so the two
+	// blocks read as the same rhythm.
+	hoverCardChartH   = 26
+	hoverCardChartGap = 10
+	// Bars are inset by this much inside their slot, which is what separates
+	// them at 24 across a 216 px card.
+	hoverCardChartInset = 1
+	// The hour labels under the bars. Twelve pixels is the glyph box of the
+	// 9 px ticks plus their leading; the labels are every third hour, the same
+	// rule the console's timeline uses, so the two charts read alike.
+	hoverCardAxisH    = 12
+	hoverCardAxisSize = 9
+	// The alpha of those labels. Dimmer than the footer: they are an axis, not
+	// something to read on the way past.
+	hoverCardAxisAlpha = 95
 )
 
-// hoverCardHeight follows the C# painter's exact vertical rhythm:
+// The mini timeline's colours. They live here rather than in either renderer so
+// the view and the Windows bitmap painter cannot drift apart — the two are
+// supposed to be the same picture drawn two ways.
+var (
+	hoverChartBar  = gui.RGBA(255, 184, 92, 120)
+	hoverChartPeak = gui.RGBA(255, 205, 130, 235)
+)
+
+// hoverCardHeight follows the C# painter's exact vertical rhythm, with the mini
+// timeline inserted after the headline:
 //
-//	pad + title(15) + big(30) + gap(10) + rows + rowsGap(6)
-//	    + footer(17) + pad
+//	pad + title(15) + big(30) + gap(10) + chart + gap(10) + rows
+//	    + rowsGap(6) + footer(17) + pad
 //
 // The empty state uses a two-line body in place of rows + rowsGap.
+//
+// Both renderers size their surface from this, so a chart drawn at a height the
+// function did not account for would be clipped rather than merely cramped.
 func hoverCardHeight(model HoverModel) float32 {
-	head := float32(hoverCardPad) + hoverCardTitleH + hoverCardBigH + hoverCardBigGap
-	foot := float32(hoverCardFooterH + hoverCardPad)
-	if len(model.Rows) == 0 {
-		return head + hoverCardRowH*2 + foot
+	box := float32(2*hoverCardBorder + 2*hoverCardPad + hoverCardTitleH + hoverCardBigH + hoverCardBigGap)
+	if hoverChartVisible(model) {
+		box += hoverChartBlockH
 	}
-	return head + float32(len(model.Rows)*hoverCardRowH+hoverCardRowsGap) + foot
+	if len(model.Rows) == 0 {
+		return box + hoverCardRowH*2 + hoverCardFooterH
+	}
+	return box + float32(len(model.Rows))*hoverCardRowH + hoverCardRowsGap + hoverCardFooterH
+}
+
+// hoverChartBlockH is everything the mini timeline costs: the plot, its hour
+// axis, and the gap below it.
+//
+// Stated once so the height function and the tests read the same number — a
+// test that spelled the sum out itself would keep passing after a part was
+// added to the chart, which is the one thing it exists to catch.
+const hoverChartBlockH = hoverCardChartH + hoverCardAxisH + hoverCardChartGap
+
+// hoverChartTop is where the mini timeline starts, from the card's top edge.
+//
+// Both renderers must land on it: the view by laying the blocks out, the
+// Windows painter by accumulating the same constants. Stating it once is what
+// lets a test hold them to it.
+const hoverChartTop = hoverCardBorder + hoverCardPad + hoverCardTitleH + hoverCardBigH + hoverCardBigGap
+
+// hoverChartVisible reports whether today has a shape worth drawing. An empty
+// chart is height the card does not need, and a flat row of stubs invites the
+// reader to interpret a day that has not started.
+func hoverChartVisible(model HoverModel) bool {
+	return hourMax(model.Hourly) > 0
+}
+
+// hoverCardChart is the mini timeline: 24 bars, the peak hour picked out.
+//
+// The peak rather than the current hour, because this is the console's timeline
+// shrunk down and the two should agree; a card that highlighted a different bar
+// from the chart it is a reduction of would be worse than one that highlights
+// nothing.
+func hoverCardChart(hours []core.HourlyUsage) gui.View {
+	max := hourMax(hours)
+	peak := peakHour(hours)
+	// The slot the bars share, rather than a fixed bar width: 24 bars have to
+	// fit the content box whatever the card's width becomes.
+	slot := float32(hoverCardWidth-2*hoverCardPad) / float32(len(hours))
+
+	bars := make([]gui.View, 0, len(hours))
+	for _, h := range hours {
+		frac := 0.0
+		if max > 0 {
+			frac = float64(h.Tokens) / float64(max)
+		}
+		barH := float32(math.Round(frac * float64(hoverCardChartH-4)))
+		// An hour with any usage keeps a visible stub, so a small hour is not
+		// indistinguishable from an idle one.
+		if h.Tokens > 0 && barH < 2 {
+			barH = 2
+		}
+
+		color := hoverChartBar
+		if h.Hour == peak {
+			color = hoverChartPeak
+		}
+
+		bar := []gui.View{}
+		if barH > 0 {
+			bar = append(bar, gui.Rectangle(gui.RectangleCfg{
+				Width:  slot - hoverCardChartInset,
+				Height: barH,
+				Color:  color,
+				Sizing: gui.FixedFixed,
+			}))
+		}
+
+		bars = append(bars, gui.Column(gui.ContainerCfg{
+			ID:      "hovercard.chart.hour." + strconv.Itoa(h.Hour),
+			Sizing:  gui.FixedFixed,
+			Width:   slot,
+			Height:  hoverCardChartH,
+			Padding: gui.NoPadding,
+			HAlign:  gui.HAlignCenter,
+			VAlign:  gui.VAlignBottom,
+			Content: bar,
+		}))
+	}
+
+	return gui.Row(gui.ContainerCfg{
+		ID:      "hovercard.chart",
+		Sizing:  gui.FillFixed,
+		Height:  hoverCardChartH,
+		Spacing: gui.SomeF(0),
+		Padding: gui.NoPadding,
+		Content: bars,
+	})
 }
 
 // HoverCardView builds the hover summary.
@@ -60,8 +193,12 @@ func hoverCardHeight(model HoverModel) float32 {
 // go-gui rasterises text itself, so handing it a view is both less code and the
 // only way the card inherits the toolkit's fonts and scaling.
 func HoverCardView(model HoverModel) []gui.View {
+	// Every block below is pinned to the height hoverCardHeight reserved for it.
+	// Left to size themselves, go-gui's containers add padding of their own and
+	// the card grows past its surface.
 	title := gui.Row(gui.ContainerCfg{
-		Sizing:  gui.FillFit,
+		Sizing:  gui.FillFixed,
+		Height:  hoverCardTitleH,
 		Spacing: gui.SomeF(6),
 		Padding: gui.NoPadding,
 		Content: []gui.View{
@@ -76,20 +213,38 @@ func HoverCardView(model HoverModel) []gui.View {
 
 	bigStyle := cardStyle(gui.TextAlignLeft, hoverCardBigSize, 245)
 	bigStyle.Typeface = glyph.TypefaceBold
-	big := gui.Text(gui.TextCfg{
-		Text:      core.Compact(int64(model.TodayTokens)),
-		TextStyle: bigStyle,
-		Sizing:    gui.FillFit,
+	big := gui.Row(gui.ContainerCfg{
+		Sizing:  gui.FillFixed,
+		Height:  hoverCardBigH,
+		Padding: gui.NoPadding,
+		Content: []gui.View{gui.Text(gui.TextCfg{
+			Text:      core.Compact(int64(model.TodayTokens)),
+			TextStyle: bigStyle,
+			Sizing:    gui.FillFit,
+		})},
 	})
 
 	body := []gui.View{title, big, hoverSpacer(hoverCardBigGap)}
 
+	if hoverChartVisible(model) {
+		body = append(body,
+			hoverCardChart(model.Hourly),
+			hoverCardAxis(model.Hourly),
+			hoverSpacer(hoverCardChartGap),
+		)
+	}
+
 	if len(model.Rows) == 0 {
-		body = append(body, gui.Text(gui.TextCfg{
-			Text:      core.T("hover.none"),
-			TextStyle: cardStyle(gui.TextAlignLeft, hoverCardRowSize, 110),
-			Mode:      gui.TextModeWrap,
-			Sizing:    gui.FillFit,
+		body = append(body, gui.Row(gui.ContainerCfg{
+			Sizing:  gui.FillFixed,
+			Height:  hoverCardRowH * 2,
+			Padding: gui.NoPadding,
+			Content: []gui.View{gui.Text(gui.TextCfg{
+				Text:      core.T("hover.none"),
+				TextStyle: cardStyle(gui.TextAlignLeft, hoverCardRowSize, 110),
+				Mode:      gui.TextModeWrap,
+				Sizing:    gui.FillFit,
+			})},
 		}))
 	} else {
 		rows := make([]gui.View, 0, len(model.Rows))
@@ -98,7 +253,8 @@ func HoverCardView(model HoverModel) []gui.View {
 		}
 		body = append(body,
 			gui.Column(gui.ContainerCfg{
-				Sizing:  gui.FillFit,
+				Sizing:  gui.FillFixed,
+				Height:  float32(len(model.Rows)) * hoverCardRowH,
 				Spacing: gui.SomeF(0),
 				Padding: gui.NoPadding,
 				Content: rows,
@@ -108,10 +264,15 @@ func HoverCardView(model HoverModel) []gui.View {
 	}
 
 	if model.HasUpdated {
-		body = append(body, gui.Text(gui.TextCfg{
-			Text:      core.T("hover.updated") + " " + model.UpdatedAt.Format("15:04"),
-			TextStyle: cardStyle(gui.TextAlignLeft, hoverCardFooterSize, 110),
-			Sizing:    gui.FillFit,
+		body = append(body, gui.Row(gui.ContainerCfg{
+			Sizing:  gui.FillFixed,
+			Height:  hoverCardFooterH,
+			Padding: gui.NoPadding,
+			Content: []gui.View{gui.Text(gui.TextCfg{
+				Text:      core.T("hover.updated") + " " + model.UpdatedAt.Format("15:04"),
+				TextStyle: cardStyle(gui.TextAlignLeft, hoverCardFooterSize, 110),
+				Sizing:    gui.FillFit,
+			})},
 		}))
 	}
 
@@ -216,6 +377,42 @@ func hoverCardRow(row HoverRow) gui.View {
 // HoverWindowTitle identifies the hover card's own window. It must not collide
 // with FlameWindowTitle: both are located by exact title match.
 const HoverWindowTitle = "CodingFire hover"
+
+// hoverCardAxis is the row of hour labels under the mini timeline.
+//
+// One slot per bar with only every third filled, exactly as the console's
+// timeline does it: a slot per hour is what keeps a label under the bar it
+// names, rather than under whichever bar a group happens to start at. The
+// labels are wider than their 8 px slot, so they are drawn at their natural
+// width and centred by the column's alignment — which overflows evenly instead
+// of being clipped to a slot that was never wide enough.
+func hoverCardAxis(hours []core.HourlyUsage) gui.View {
+	slot := float32(hoverCardWidth-2*hoverCardPad) / float32(len(hours))
+	ticks := make([]gui.View, 0, len(hours))
+	for _, h := range hours {
+		ticks = append(ticks, gui.Column(gui.ContainerCfg{
+			ID:      "hovercard.axis.hour." + strconv.Itoa(h.Hour),
+			Sizing:  gui.FixedFixed,
+			Width:   slot,
+			Height:  hoverCardAxisH,
+			Padding: gui.NoPadding,
+			HAlign:  gui.HAlignCenter,
+			Content: []gui.View{gui.Text(gui.TextCfg{
+				Text:      hourLabel(h.Hour),
+				TextStyle: cardStyle(gui.TextAlignCenter, hoverCardAxisSize, hoverCardAxisAlpha),
+				Sizing:    gui.FitFit,
+			})},
+		}))
+	}
+	return gui.Row(gui.ContainerCfg{
+		ID:      "hovercard.axis",
+		Sizing:  gui.FillFixed,
+		Height:  hoverCardAxisH,
+		Spacing: gui.SomeF(0),
+		Padding: gui.NoPadding,
+		Content: ticks,
+	})
+}
 
 // hoverCardState carries the model into the card's window.
 //

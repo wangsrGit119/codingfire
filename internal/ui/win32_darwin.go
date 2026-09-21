@@ -222,6 +222,28 @@ func ApplyOverlayWindowStyles(title string, topMost, clickThrough bool) uintptr 
 	return hwnd
 }
 
+// GuardOverlayWindow re-asserts the campfire's window level and restores a
+// window something else hid.
+//
+// AppKit exposes no "who is above me" query, so unlike the Windows version this
+// cannot detect that another floating window has displaced the campfire. It
+// re-applies setLevel: instead, which is idempotent and cheap.
+func GuardOverlayWindow(hwnd uintptr, wantVisible bool) (bool, string) {
+	if !WindowAlive(hwnd) {
+		return false, ""
+	}
+	if !wantVisible {
+		return true, ""
+	}
+	if !WindowVisible(hwnd) {
+		SetWindowVisible(hwnd, true)
+		SetTopMost(hwnd, true)
+		return true, "had been hidden"
+	}
+	SetTopMost(hwnd, true)
+	return true, ""
+}
+
 // SetWindowVisible shows or hides a window without activating it.
 func SetWindowVisible(hwnd uintptr, visible bool) bool {
 	if hwnd == 0 {

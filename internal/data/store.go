@@ -42,6 +42,9 @@ type cursorState struct {
 type TodayStats struct {
 	Total    int
 	BySource map[core.UsageSource]int
+	// ByModel only counts events that actually name a model, so its sum is
+	// less than Total whenever any source is silent about it.
+	ByModel map[string]int
 }
 
 // UsageStore is the local event store.
@@ -78,6 +81,7 @@ type UsageStore struct {
 	statsDaySet   bool
 	statTotal     int
 	statBySource  map[core.UsageSource]int
+	statByModel   map[string]int
 	statHourly    [24]int
 	statIn        int
 	statOut       int
@@ -98,6 +102,7 @@ func NewUsageStore() *UsageStore {
 		cursors:      map[string]cursorState{},
 		meta:         map[string]string{},
 		statBySource: map[core.UsageSource]int{},
+		statByModel:  map[string]int{},
 	}
 }
 
@@ -336,9 +341,16 @@ func (s *UsageStore) TodayTotals(now time.Time) TodayStats {
 	defer s.mu.Unlock()
 
 	s.ensureStatsDayLocked(now)
-	out := TodayStats{Total: s.statTotal, BySource: make(map[core.UsageSource]int, len(s.statBySource))}
+	out := TodayStats{
+		Total:    s.statTotal,
+		BySource: make(map[core.UsageSource]int, len(s.statBySource)),
+		ByModel:  make(map[string]int, len(s.statByModel)),
+	}
 	for k, v := range s.statBySource {
 		out.BySource[k] = v
+	}
+	for k, v := range s.statByModel {
+		out.ByModel[k] = v
 	}
 	return out
 }
@@ -388,6 +400,7 @@ func (s *UsageStore) recomputeStatsLocked(day time.Time) {
 	s.statsDaySet = true
 	s.statTotal = 0
 	s.statBySource = map[core.UsageSource]int{}
+	s.statByModel = map[string]int{}
 	s.statHourly = [24]int{}
 	s.statIn, s.statOut, s.statCacheRead, s.statCacheWrit = 0, 0, 0, 0
 
@@ -405,6 +418,9 @@ func (s *UsageStore) accumulateLocked(e core.UsageEvent, end time.Time) {
 	}
 	s.statTotal += e.Tokens
 	s.statBySource[e.Source] += e.Tokens
+	if e.Model != "" {
+		s.statByModel[e.Model] += e.Tokens
+	}
 	if h := e.Timestamp.Hour(); h >= 0 && h < 24 {
 		s.statHourly[h] += e.Tokens
 	}
@@ -633,6 +649,13 @@ func encodeLine(e core.UsageEvent) string {
 	if e.Breakdown.CacheWrite != nil {
 		fmt.Fprintf(&b, `,"cw":%d`, *e.Breakdown.CacheWrite)
 	}
+	// Optional, and omitted when empty so a row from a source that states no
+	// model does not grow. The C# build reads this file by key, so it ignores
+	// the extra field rather than choking on it.
+	if e.Model != "" {
+		b.WriteString(`,"m":`)
+		b.WriteString(core.QuoteString(e.Model))
+	}
 	if e.FilePath != "" {
 		b.WriteString(`,"f":`)
 		b.WriteString(core.QuoteString(e.FilePath))
@@ -688,6 +711,7 @@ func decodeLine(line string) (core.UsageEvent, bool) {
 		Timestamp:   epoch.Add(time.Duration(secs * float64(time.Second))).Local(),
 		Tokens:      tok,
 		Breakdown:   core.UsageBreakdown{Input: in, Output: out, CacheRead: cr, CacheWrite: cw},
+		Model:       o.Str("m"),
 		FilePath:    o.Str("f"),
 		IsEstimated: est == 1,
 	}, true

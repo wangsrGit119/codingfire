@@ -71,6 +71,9 @@ func ApplyOverlayWindowStyles(title string, topMost, clickThrough bool) uintptr 
 	return 0
 }
 
+// GuardOverlayWindow reports no window, because this platform has none.
+func GuardOverlayWindow(hwnd uintptr, wantVisible bool) (bool, string) { return false, "" }
+
 // WindowAlive reports false.
 func WindowAlive(hwnd uintptr) bool { return false }
 
