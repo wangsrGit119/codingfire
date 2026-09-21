@@ -1,6 +1,6 @@
-# CodingFire（Go 版）
+# CodingFire
 
-把 AI 编程烧掉的 token 变成桌面上的一把像素篝火 —— 火势就是当前的 token 消耗速率。
+把 AI 编程烧掉的 token 变成桌面上的一把像素篝火 —— 烧得越快，火越旺。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#系统要求)
@@ -16,30 +16,47 @@
   <img src="assets/example_02.gif" width="344" alt="CodingFire —— 经典橙色火苗">
 </p>
 
-一个常驻桌面顶层的小篝火，读取 AI 编程工具本来就写在磁盘上的 token 用量日志。
-烧得越快，火越旺。
+## 功能
 
-- **火势 = 实时 token 消耗速率**；多客户端同时跑也只有一把火（火势加总）
-- 鼠标悬停弹出当日用量卡片与实时 tok/s
-- **全程只读本地日志**，不联网、不上传、不读 prompt 或代码内容
-- 单个静态 exe，**零运行时依赖**，不需要 .NET，不需要安装
+**火势即速率。** 一个常驻桌面顶层的小篝火，读取 AI 编程工具本来就写在磁盘上的 token
+用量日志。火势跟着**当前**消耗速率走 —— 一段忙碌的 agent 会话会把它从余烬推成旺火，
+闲下来又慢慢烧回余烬。多个客户端同时跑也只有一把火（速率加总）。
 
-> 这是用 Go + [go-gui](https://github.com/go-gui-org/go-gui) 重写的版本，功能与
-> [C#/.NET 版](https://github.com/wangsrGit119/codingfire-win)完全对等。Windows 7 / 8
-> 请继续用 C# 版。**两版可以同时装** —— 数据目录、开机自启项、单实例锁各自独立。
+**悬停卡片。** 鼠标移到火上，显示当日用量、实时 tok/s 和当前档位。
+
+**统计控制台。** 右键或双击托盘图标：
+
+| 页签 | 内容 |
+|---|---|
+| **统计** | 当日总量、逐小时时间线图表、按来源拆分、峰值速率、近期趋势 |
+| **数据源** | 每个找过的来源、是否找到、贡献了多少 token |
+| **设置** | 火焰尺寸与配色、各来源圆点颜色、鼠标穿透、开机自启、语言、位置 |
+| **关于** | 版本号与项目主页 |
+
+**桌面行为。** 常驻顶层；**默认开启鼠标穿透**，免得篝火把本该点给下面桌面图标的点击
+吃掉。把鼠标移到篝火上按住左键即可拖动。默认随桌面启动，不想要就在菜单里关掉。
+
+**四种界面语言** —— 英文、简体中文、日本語、한국어，也可以跟随系统。
+
+**只读、离线。** 不联网、不上传、无遥测。不读 prompt、代码或文件内容，只取 token
+数字与它们所在的文件路径。
+
+**单文件、零运行时。** 一个静态可执行文件 —— 不需要 .NET、不引入 DLL、没有安装过程、
+不需要管理员权限。内置 **23 个本地数据源**，见[下文](#支持的数据源)。
 
 ## 系统要求
 
 | 系统 | 需要什么 |
 |---|---|
-| Windows 11 / 10（64 位） | 无，单个自包含 exe |
-| Windows 8 / 8.1、Windows 7 SP1 | 请改用 [C# 版](https://github.com/wangsrGit119/codingfire-win) |
+| Windows 11 / 10（64 位） | 无，单个自包含可执行文件 |
 | Linux（x64、arm64） | X11 会话 + 合成器（透明窗口需要），托盘还需要一个 StatusNotifier 宿主 |
 | macOS（Intel、Apple 芯片） | 除了首次放行 Gatekeeper 之外，无 |
 
-Go 1.21 起不再支持 Windows 7 / 8，所以 Windows 版**只支持 Win10 及以上**。以
-`CGO_ENABLED=0` 编译、不链接 C 运行库，所以是完全静态的单个文件 ——
-代价是体积约 18 MB（C# 版是 191 KB）。磁盘很便宜，缺 DLL 不便宜。
+Windows 7、Windows 8 以及任何 32 位 Windows，请改用
+[C# 版](https://github.com/wangsrGit119/codingfire-win)。
+
+Windows 版体积约 18 MB：以 `CGO_ENABLED=0` 编译、不链接 C 运行库，所以是完全静态的
+单个文件。
 
 **Windows 是打磨最充分的目标平台** —— 程序本来就是为它写的，也是唯一使用原生分层位图
 窗口的版本。Linux 与 macOS 分别走 go-gui 的 X11 与 Metal 后端，外加一层自己的平台垫片
@@ -51,19 +68,7 @@ Go 1.21 起不再支持 Windows 7 / 8，所以 Windows 版**只支持 Win10 及�
 到 [Releases](../../releases) 下载最新 zip，解压到任意目录直接运行。
 压缩包里只有一个文件，没有安装过程。
 
-- **鼠标移到火上** —— 当日用量卡片、实时 tok/s、当前档位
-- **右键 / 双击托盘图标** —— 菜单与统计控制台
-- **默认随桌面启动** —— 不想要的话在菜单里取消勾选即可
-
 首次启动没有数据时，火保持「余烬」状态，属正常。
-
-### 鼠标穿透
-
-Windows 版火焰和悬浮卡片使用原生分层位图窗口，与 C# 版一样，全透明像素天然不拦截点击。
-各平台也都提供**鼠标穿透**开关（托盘菜单，以及控制台「设置」页），**默认开启**，
-免得篝火把本该点给桌面图标的点击吃掉。把鼠标移到篝火上，按住鼠标左键即可拖动；
-由于穿透窗口收不到普通鼠标消息，程序会轮询全局鼠标按键状态来实现拖动。关闭鼠标穿透
-后，篝火窗口本身也会接收点击。
 
 ## 各平台说明
 
@@ -84,7 +89,7 @@ Windows 版火焰和悬浮卡片使用原生分层位图窗口，与 C# 版一�
 - **macOS** 发布的是未签名包，首次启动会被 Gatekeeper 拦下，需要在「系统设置 ›
   隐私与安全性」里放行一次。程序没有 Dock 图标，常驻菜单栏。
 - **各平台都还没做**逐像素穿透。go-gui 把窗口当成一整块画面并自己做命中测试，所以穿透
-  只能是全有或全无。C# 版靠 `UpdateLayeredWindow` 拿到逐像素穿透，本版做不到。
+  只能是全有或全无。
 
 ## 支持的数据源
 
@@ -122,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1            # vet + 构建 -> 
 powershell -ExecutionPolicy Bypass -File build.ps1 -Run       # 构建后直接启动
 powershell -ExecutionPolicy Bypass -File build.ps1 -Dump      # 构建后输出用量报告
 powershell -ExecutionPolicy Bypass -File build.ps1 -Render    # 构建后渲染各档火势
-powershell -ExecutionPolicy Bypass -File release.ps1 -Version 1.0.0   # 打包 + 打 tag + 发布
+powershell -ExecutionPolicy Bypass -File release.ps1 -Version 1.1.0   # 打包 + 打 tag + 发布
 ```
 
 构建会先跑 `go vet ./...`，有告警就直接中止。产物是 `dist\CodingFire.exe`，带
@@ -186,8 +191,8 @@ go test ./internal/ui -run TestOverlayMemoryProbe -v -count=1
 [`.github/workflows/release.yml`](.github/workflows/release.yml) 会自动构建、打包并发布：
 
 ```bash
-git tag -a v1.0.0 -m "CodingFire (Go) v1.0.0"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "CodingFire v1.1.0"
+git push origin v1.1.0
 ```
 
 如果 `internal/core/version.go` 声明的版本与 tag 不一致，工作流会直接中止。也可以在
@@ -235,8 +240,7 @@ Actions 页面手动触发，自己填版本号。
 | Linux | `$XDG_CONFIG_HOME/autostart/CodingFireGo.desktop` |
 | macOS | `~/Library/LaunchAgents/com.codingfire.go.plist` |
 
-每个名字都带 `Go` 标记，所以不会和 C# 版（用的是不带标记的名字）撞上：两版本就设计成
-可以共存，名字撞了会让其中一版悄悄把另一版的自启项关掉。
+每个名字都带 `Go` 标记，所以它不会和另一份副本撞名、把对方的自启项悄悄关掉。
 
 无界面自检：
 
@@ -245,7 +249,7 @@ CodingFire.exe --dump 报告.txt     # 输出统计报告
 CodingFire.exe --render 目录       # 把各档火势渲染成 PNG
 ```
 
-`--dump` 的输出格式与 C# 版逐字节兼容，两版的报告可以直接对比。报告**固定用英文**，
+`--dump` 输出纯文本报告：总量、按来源拆分、以及已存历史。报告**固定用英文**，
 与界面语言设置无关。
 
 ## CPU、显卡与内存占用
@@ -265,7 +269,7 @@ CodingFire.exe --render 目录       # 把各档火势渲染成 PNG
 
 同场景内存探针测得：火焰约 33 MiB、悬浮卡片约 34 MiB、关闭控制台后约 37 MiB。
 控制台打开期间仍有较大的临时开销（本次约 182 MiB）。这是进程工作集，不是固定内存承诺；
-详见[对比记录](perf-artifacts/memory-optimization-report.md)。目前未达到 C# 版反馈的 14 MB。
+详见[对比记录](perf-artifacts/memory-optimization-report.md)。
 
 需要诊断渲染问题时，可设置 `CODINGFIRE_OVERLAY_BACKEND=gl` 使用旧 OpenGL 路径；
 不设置时默认使用低内存的 Windows 位图路径。

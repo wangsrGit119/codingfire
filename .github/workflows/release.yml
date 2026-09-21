@@ -380,9 +380,8 @@ jobs:
             'The download is not code-signed, so Gatekeeper needs it allowed once under',
             'System Settings > Privacy & Security.',
             '',
-            'The [C#/.NET build](https://github.com/wangsrGit119/codingfire-win) remains the',
-            'choice for Windows 7 and 8; this one trades that range for a self-contained',
-            'binary and no .NET dependency.'
+            'The [C#/.NET build](https://github.com/wangsrGit119/codingfire-win) is the',
+            'one to use on Windows 7 and 8.'
           ) -join "`n"
 
           gh release view $tag -R $repo 2>$null | Out-Null

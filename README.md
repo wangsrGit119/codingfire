@@ -1,6 +1,7 @@
-# CodingFire (Go)
+# CodingFire
 
-Turn your AI coding token burn into a pixel campfire on the desktop.
+Turn your AI coding token burn into a pixel campfire on the desktop. The faster
+you burn tokens, the bigger the fire.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#requirements)
@@ -16,34 +17,52 @@ Turn your AI coding token burn into a pixel campfire on the desktop.
   <img src="assets/example_02.gif" width="344" alt="CodingFire - campfire with the classic orange flame">
 </p>
 
-A small always-on-top campfire that reads the token usage logs your AI coding
-tools already write to disk. The faster you burn tokens, the bigger the fire.
+## Features
 
-- **Fire intensity = current token burn rate.** Several clients at once still
-  share a single fire; their rates are summed
-- **Hover for today's usage card** with a live tok/s reading and the current tier
-- **Read-only.** No network, no uploads, and prompts or code are never read
-- **Zero runtime dependencies** - one static `.exe`, no .NET, no installer
+**The fire.** A small always-on-top campfire that reads the token usage logs your
+AI coding tools already write to disk. Its intensity is your *current* burn rate,
+so a busy agent session drives it from embers to a blaze and an idle one lets it
+die back down. Several clients running at once still share one fire - their rates
+are summed.
 
-> This is the Go + [go-gui](https://github.com/go-gui-org/go-gui) rewrite. It is
-> feature-for-feature with the
-> [C#/.NET build](https://github.com/wangsrGit119/codingfire-win), which is still
-> the one to use on Windows 7 and 8. **The two install side by side** - separate
-> data directories, separate autostart entries, separate single-instance locks.
+**The hover card.** Hover the flame for today's usage, a live tok/s reading, and
+the tier the fire is in right now.
+
+**The console.** Right-click or double-click the tray icon:
+
+| Tab | Shows |
+|---|---|
+| **Stats** | Today's totals, an hourly timeline chart, the per-source breakdown, the peak rate, and the recent trend |
+| **Sources** | Every source that was looked for, whether it was found, and what it contributed |
+| **Settings** | Flame size and colour, per-source dot colours, click-through, autostart, language, position |
+| **About** | Version, and the project link |
+
+**Desktop behaviour.** Always on top, and click-through by default so the campfire
+never swallows a click meant for the desktop underneath it. Hold the left mouse
+button over it to drag it. It starts with the desktop unless you turn that off.
+
+**Four UI languages** - English, 简体中文, 日本語, 한국어 - or follow the system.
+
+**Read-only, and offline.** No network, no uploads, no telemetry. Prompts, code
+and file contents are never read: only token counters, and the paths they live in.
+
+**One file, no runtime.** A single static binary - no .NET, no DLLs, no
+installer, and no admin rights. 23 local data sources, listed
+[below](#supported-data-sources).
 
 ## Requirements
 
 | OS | Needs |
 |---|---|
-| Windows 11 / 10 (64-bit) | Nothing - one self-contained `.exe` |
-| Windows 8 / 8.1, Windows 7 SP1 | Use the [C# build](https://github.com/wangsrGit119/codingfire-win) instead |
+| Windows 11 / 10 (64-bit) | Nothing - one self-contained binary |
 | Linux (x64, arm64) | An X11 session with a compositing manager, and a StatusNotifier host for the tray |
 | macOS (Intel, Apple silicon) | Nothing beyond Gatekeeper's approval - one unsigned binary |
 
-Go 1.21 dropped Windows 7 and 8 support, so the Windows build is Windows 10 and
-later. It is compiled with `CGO_ENABLED=0` and links no C runtime: the binary is
-fully static, which is why it is ~18 MB rather than the C# build's 191 KB. Disk
-is cheap; a missing DLL is not.
+On Windows 7, Windows 8, or any 32-bit Windows, use the
+[C# build](https://github.com/wangsrGit119/codingfire-win) instead.
+
+The Windows binary is about 18 MB: it is compiled with `CGO_ENABLED=0` and links
+no C runtime, so it is fully static.
 
 **Windows is the most thoroughly exercised target** - it is the one the app was
 written for, and the only one whose overlay uses native layered bitmap windows.
@@ -57,22 +76,7 @@ rough. `windows/arm64` is built and published but has never been run.
 Grab the latest zip from [Releases](../../releases), unpack it anywhere and run
 it. There is nothing to install - each zip contains exactly one file.
 
-- **Hover the fire** - today's usage card, live tok/s, current tier
-- **Right-click / double-click the tray icon** - menu and statistics console
-- **Starts with the desktop by default** - turn it off any time from the menu
-
 With no data yet the fire stays in an "embers" state. That is normal.
-
-### Click-through
-
-On Windows the flame and hover card use native layered bitmap windows, like the
-C# build, so transparent pixels pass clicks through. Every platform also offers a
-**Click-through** toggle (tray menu, and the Settings tab of the console), **on by
-default**, so the campfire does not swallow clicks meant for the desktop icons
-underneath it. Hold the left mouse button over the campfire to drag it; the app
-polls the global button state because a click-through window does not receive
-normal mouse messages. Turn click-through off if you want the campfire window
-itself to receive clicks.
 
 ## Platform notes
 
@@ -97,8 +101,7 @@ top, make it click-through and move it; none of them can be checked by a compile
   and lives in the menu bar.
 - **Not yet implemented anywhere:** per-pixel click-through. go-gui renders a
   window as a single surface and hit-tests its own widgets, so pass-through is
-  all-or-nothing. The C# build gets per-pixel pass-through from
-  `UpdateLayeredWindow`; this one cannot.
+  all-or-nothing.
 
 ## Supported data sources
 
@@ -141,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1            # vet + build -> d
 powershell -ExecutionPolicy Bypass -File build.ps1 -Run       # build, then launch
 powershell -ExecutionPolicy Bypass -File build.ps1 -Dump      # build, then write a usage report
 powershell -ExecutionPolicy Bypass -File build.ps1 -Render    # build, then render the fire tiers
-powershell -ExecutionPolicy Bypass -File release.ps1 -Version 1.0.0   # zip, tag, release
+powershell -ExecutionPolicy Bypass -File release.ps1 -Version 1.1.0   # zip, tag, release
 ```
 
 The build runs `go vet ./...` before compiling and refuses to continue if it
@@ -216,8 +219,8 @@ Releases are cut by CI. Push a tag and
 and publishes it:
 
 ```bash
-git tag -a v1.0.0 -m "CodingFire (Go) v1.0.0"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "CodingFire v1.1.0"
+git push origin v1.1.0
 ```
 
 It aborts if `internal/core/version.go` declares a different version than the
@@ -272,9 +275,8 @@ moment you turn autostart off:
 | Linux | `$XDG_CONFIG_HOME/autostart/CodingFireGo.desktop` |
 | macOS | `~/Library/LaunchAgents/com.codingfire.go.plist` |
 
-Every name carries the `Go` marker so it cannot collide with the C# build's,
-which uses the unmarked names: the two are meant to install side by side, and a
-shared name would make each silently disable the other's login entry.
+Every name carries the `Go` marker, so it cannot collide with another copy of the
+app and silently disable its login entry.
 
 Headless self-checks:
 
@@ -283,9 +285,9 @@ CodingFire.exe --dump report.txt   # statistics report
 CodingFire.exe --render out-dir    # render each fire tier to PNG
 ```
 
-`--dump`'s format is byte-compatible with the C# build's, so a report from either
-can be compared directly. The report always uses English, regardless of your
-configured UI language.
+`--dump` writes a plain-text report: totals, the per-source breakdown, and the
+stored history. The report always uses English, regardless of your configured UI
+language.
 
 ## Resource usage
 
