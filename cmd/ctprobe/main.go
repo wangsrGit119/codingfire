@@ -1,8 +1,8 @@
 package main
 
 // Diagnostic entry point: render one console tab headlessly, without showing a
-// window. Used to check the console layout and to regenerate the render samples
-// under perf-artifacts/. Not part of the shipped binary.
+// window, and report how each tab lays out at a given size. Not part of the
+// shipped binary.
 
 import (
 	"fmt"

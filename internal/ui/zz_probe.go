@@ -1,8 +1,8 @@
 package ui
 
-// Diagnostic probes for cmd/ctprobe, which renders console tabs headlessly so
-// the layout can be inspected and the samples under perf-artifacts/
-// regenerated. Not part of the shipped binary.
+// Diagnostic probes for cmd/ctprobe, which renders an overlay or a console tab
+// headlessly so the layout can be measured without a screen. Not part of the
+// shipped binary.
 
 import (
 	"fmt"

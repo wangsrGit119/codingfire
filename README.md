@@ -30,7 +30,6 @@ you burn tokens, the bigger the fire.
   and file contents are never read.
 - **Light on resources.** A hidden flame is not redrawn and the fallback scan runs
   every 4 seconds - about 33 MiB of working set.
-  [Measurements](perf-artifacts/memory-optimization-report.md).
 - **One static binary.** No .NET, no DLLs, no installer, no admin rights.
 
 ## Requirements
