@@ -3,8 +3,13 @@ name: Release
 # Two ways in:
 #   * push a tag like v1.0.0
 #   * Actions tab -> Release -> Run workflow, and type the version
-# Both end up building the same thing and publishing the same asset name, so a
-# release cut by hand and one cut by a tag are indistinguishable afterwards.
+# Both end up building the same set of assets, so a release cut by hand and one
+# cut by a tag are indistinguishable afterwards.
+#
+# Layout: verify once, then build every platform in parallel, then publish. The
+# publish job depends on all of the build jobs, so a platform that stops
+# compiling fails the run *before* anything is attached to the release - a
+# release with a missing or stale asset is worse than a red run.
 
 on:
   push:
@@ -24,10 +29,15 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  release:
-    runs-on: windows-latest
+# Pure-Go cross-compilation, so no target needs a C toolchain installed.
+env:
+  CGO_ENABLED: '0'
 
+jobs:
+  verify:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,27 +92,51 @@ jobs:
       - name: go test
         run: go test ./...
 
+  # Windows legs run on a Windows runner, so the amd64 one can be *executed* and
+  # its --dump header read back. That is the strongest check available and it is
+  # the platform that actually ships today.
+  windows:
+    needs: verify
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64, asset: CodingFire-win-x64 }
+          - { goarch: arm64, asset: CodingFire-win-arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Build
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $env:CGO_ENABLED = '0'
-          $env:GOOS        = 'windows'
-          $env:GOARCH      = 'amd64'
-          go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist\CodingFire.exe .
+          $env:GOOS   = 'windows'
+          $env:GOARCH = '${{ matrix.goarch }}'
+          go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist/CodingFire.exe .
           if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
-          Write-Host ("built {0:N0} bytes" -f (Get-Item dist\CodingFire.exe).Length)
+          Write-Host ("built {0:N0} bytes" -f (Get-Item dist/CodingFire.exe).Length)
 
-      # The step above proves the *source* declares the right version. This one
+      # The assert above proves the *source* declares the right version. This
       # proves the thing we are about to ship agrees. Without it a build that
-      # silently failed to replace an existing dist\CodingFire.exe would package
+      # silently failed to replace an existing dist/CodingFire.exe would package
       # the previous version's binary under the new tag.
+      #
+      # amd64 only: an arm64 exe cannot be executed on the x64 runner.
       - name: Verify the built binary reports this version
+        if: matrix.goarch == 'amd64'
         shell: pwsh
         run: |
-          $ver = '${{ steps.v.outputs.version }}'
+          $ver = '${{ needs.verify.outputs.version }}'
           $report = Join-Path $env:RUNNER_TEMP 'version-check.txt'
-          & 'dist\CodingFire.exe' --dump $report | Out-Null
+          & 'dist/CodingFire.exe' --dump $report | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "the built binary exited $LASTEXITCODE on --dump." }
           if (-not (Test-Path -LiteralPath $report)) { throw 'the built binary wrote no report.' }
           $head = (Get-Content -LiteralPath $report -TotalCount 1)
@@ -112,45 +146,155 @@ jobs:
           }
 
       - name: Package
-        id: pkg
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $ver = '${{ steps.v.outputs.version }}'
-          $zip = "CodingFire-win-x64-v$ver.zip"
+          $ver = '${{ needs.verify.outputs.version }}'
+          $asset = '${{ matrix.asset }}'
+          $zip = "$asset-v$ver.zip"
           # One file in the zip, on purpose: "unpack and run" should be literally
           # true, with nothing to keep alongside the binary.
-          Compress-Archive -LiteralPath @('dist\CodingFire.exe') -DestinationPath $zip -Force
+          Compress-Archive -LiteralPath @('dist/CodingFire.exe') -DestinationPath $zip -Force
           Write-Host ("$zip  {0:N0} bytes" -f (Get-Item $zip).Length)
-          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}-v*.zip
+          if-no-files-found: error
+
+  # Everything else is cross-compiled. None of these can be run on the runner,
+  # so they get the two checks that do not need execution: the binary's recorded
+  # GOOS/GOARCH must match the label we are about to ship it under, and the
+  # version constant must be present in it.
+  #
+  # Note these are not "supported" in the same sense as the Windows build: the
+  # platform shims in win32_other.go / autostart_other.go are deliberate no-ops
+  # (no click-through, no window positioning, no autostart), so expect a degraded
+  # overlay. They are published so the platform work has somewhere to land.
+  unix:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64, asset: CodingFire-linux-x64 }
+          - { goos: linux,  goarch: arm64, asset: CodingFire-linux-arm64 }
+          - { goos: darwin, goarch: amd64, asset: CodingFire-macos-x64 }
+          - { goos: darwin, goarch: arm64, asset: CodingFire-macos-arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $env:GOOS   = '${{ matrix.goos }}'
+          $env:GOARCH = '${{ matrix.goarch }}'
+          go build -trimpath -ldflags '-s -w' -o dist/CodingFire .
+          if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
+          Write-Host ("built {0:N0} bytes" -f (Get-Item dist/CodingFire).Length)
+
+      - name: Verify the binary matches its label and version
+        shell: pwsh
+        run: |
+          $ver = '${{ needs.verify.outputs.version }}'
+          $goos = '${{ matrix.goos }}'
+          $goarch = '${{ matrix.goarch }}'
+          $info = (go version -m dist/CodingFire 2>&1 | Out-String)
+          Write-Host $info
+          if ($info -notmatch "GOOS=$goos") {
+            throw "the binary was not built for $goos."
+          }
+          if ($info -notmatch "GOARCH=$goarch") {
+            throw "the binary was not built for $goarch."
+          }
+          # "CodingFire " + Version is a constant expression, so the compiler folds
+          # it and the literal survives -s -w. Scanning for it catches an asset
+          # built from a tree whose version constant drifted.
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes('dist/CodingFire'))
+          if ($text -notmatch [regex]::Escape("CodingFire $ver")) {
+            throw "the binary does not contain 'CodingFire $ver'."
+          }
+          Write-Host "ok: $goos/$goarch, reports $ver"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $ver = '${{ needs.verify.outputs.version }}'
+          $asset = '${{ matrix.asset }}'
+          $zip = "$asset-v$ver.zip"
+          Compress-Archive -LiteralPath @('dist/CodingFire') -DestinationPath $zip -Force
+          Write-Host ("$zip  {0:N0} bytes" -f (Get-Item $zip).Length)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}-v*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, windows, unix]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every built asset
+        uses: actions/download-artifact@v4
+        with:
+          pattern: CodingFire-*
+          merge-multiple: true
+          path: assets
 
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ver = '${{ steps.v.outputs.version }}'
+          $ver = '${{ needs.verify.outputs.version }}'
           $tag = "v$ver"
-          $zip = '${{ steps.pkg.outputs.zip }}'
+          $zips = @(Get-ChildItem -Path assets -Filter *.zip | ForEach-Object { $_.FullName })
+          if ($zips.Count -eq 0) { throw 'no assets were built.' }
+          Write-Host "publishing $($zips.Count) asset(s):"
+          $zips | ForEach-Object { Write-Host ("  " + (Split-Path $_ -Leaf)) }
 
-          # Built as an array rather than a here-string: a here-string's closing
-          # '@ must sit at column 0, which a YAML block scalar will not give you.
+          # The asset list is generated rather than written out, so the notes can
+          # never advertise a platform that failed to build.
           $notes = @(
-            'CodingFire for Windows (Go) - one static exe, no installer, no runtime, no DLLs.',
+            'CodingFire - a campfire overlay that shows how hard your local AI tools are working.',
             '',
-            '* Windows 10 and later, x64',
-            '* 23 read-only local data sources, including WorkBuddy (CN) and WorkBuddy (INTL) counted separately',
-            '* Same `--dump` report format as the C# build, byte for byte',
+            'Assets:',
+            ($zips | ForEach-Object { '- `' + (Split-Path $_ -Leaf) + '`' }),
             '',
-            'The [C#/.NET build](https://github.com/wangsrGit119/codingfire-win) remains the choice for Windows 7 and 8; this one trades that range for a self-contained binary and no .NET dependency.'
+            '**Windows 10 and later, x64, is the supported target.** The Linux and macOS',
+            'builds are attached so that platform work has somewhere to land, but the',
+            'platform shims are still no-ops there (no click-through, no window',
+            'positioning, no autostart), so expect a degraded overlay.',
+            '',
+            'The [C#/.NET build](https://github.com/wangsrGit119/codingfire-win) remains the',
+            'choice for Windows 7 and 8; this one trades that range for a self-contained',
+            'binary and no .NET dependency.'
           ) -join "`n"
 
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "release $tag already exists - replacing the asset"
-            gh release upload $tag $zip --clobber
+            Write-Host "release $tag already exists - replacing assets"
+            gh release upload $tag $zips --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed (exit $LASTEXITCODE)." }
+            # Notes are regenerated on every run, so re-running the workflow after
+            # adding a platform cannot leave the old platform list behind.
+            gh release edit $tag --title "CodingFire $tag" --notes $notes
           } else {
-            gh release create $tag $zip --title "CodingFire for Windows (Go) $tag" --notes $notes --target $env:GITHUB_SHA
+            gh release create $tag $zips --title "CodingFire $tag" --notes $notes --target $env:GITHUB_SHA
           }
           if ($LASTEXITCODE -ne 0) { throw "gh failed (exit $LASTEXITCODE)." }
           Write-Host "published $tag"

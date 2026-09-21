@@ -34,10 +34,17 @@
 |---|---|
 | Windows 11 / 10（64 位） | 无，单个自包含 exe |
 | Windows 8 / 8.1、Windows 7 SP1 | 请改用 [C# 版](https://github.com/wangsrGit119/codingfire-win) |
+| Linux / macOS | **实验性**：会构建发布，但尚不可用 |
 
 Go 1.21 起不再支持 Windows 7 / 8，所以本版**只支持 Win10 及以上**。以
-`windows/amd64` 编译、`CGO_ENABLED=0`、不链接 C 运行库，所以是完全静态的单个文件 ——
+`CGO_ENABLED=0` 编译、不链接 C 运行库，所以是完全静态的单个文件 ——
 代价是体积约 18 MB（C# 版是 191 KB）。磁盘很便宜，缺 DLL 不便宜。
+
+每次发布也会附上 Linux（`x64` / `arm64`）与 macOS（`x64` / `arm64`）的压缩包，
+**给后续移植留个落点，但目前还不能用**：`internal/ui/win32_other.go`、
+`internal/core/autostart_other.go` 等平台桩是有意留空的 no-op，所以在非 Windows 上
+既没有鼠标穿透，也没有窗口定位和开机自启。**正式支持的只有 Windows**；
+`windows/arm64` 会构建发布，但从未实机跑过。
 
 ## 下载与运行
 
@@ -143,7 +150,16 @@ git push origin v1.0.0
 如果 `internal/core/version.go` 声明的版本与 tag 不一致，工作流会直接中止。也可以在
 Actions 页面手动触发，自己填版本号。
 
-不想等 runner 的话，`release.ps1` 在本地做同样的事。
+工作流先统一校验一次，再并行构建全部目标，最后才发布 —— 所以某个平台编不过时，整条
+流水线会**在往 release 挂任何东西之前**失败。目标：`windows/amd64`、`windows/arm64`、
+`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`，每个都是一个单文件 zip。
+
+每个产物都会按自己的标签校验：Windows `amd64` 那个会被真正执行、读回 `--dump` 头；
+交叉编译的用 `go version -m` 确认二进制里记录的 `GOOS`/`GOARCH` 与它将挂上去的名字
+一致，再扫一遍版本号字面量。`.github/workflows/ci.yml` 在每次 push 时编译同一套矩阵，
+所以某个平台被改坏会在**造成破坏的那次提交上**暴露，而不是等到打 tag。
+
+不想等 runner 的话，`release.ps1` 在本地做同样的事（只构建 Windows 目标）。
 
 ## 数据放在哪
 

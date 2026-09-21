@@ -13,8 +13,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CGO_ENABLED: '0'
+
 jobs:
-  build:
+  test:
     # Windows, not Linux: a good part of this program is Windows-only
     # (win32_windows.go, the layered-bitmap and GDI paths), and those files are
     # excluded by build tags everywhere else. vet and test on Linux would pass
@@ -41,9 +44,47 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $env:CGO_ENABLED = '0'
-          $env:GOOS        = 'windows'
-          $env:GOARCH      = 'amd64'
-          go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist\CodingFire.exe .
+          $env:GOOS   = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist/CodingFire.exe .
           if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
-          Write-Host ("built {0:N0} bytes" -f (Get-Item dist\CodingFire.exe).Length)
+          Write-Host ("built {0:N0} bytes" -f (Get-Item dist/CodingFire.exe).Length)
+
+  # Every target the release workflow publishes, compiled on each push. Keeping
+  # this here means a change that breaks one platform shows up on the commit that
+  # broke it rather than on the tag, when the release job would simply refuse to
+  # publish.
+  crossbuild:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $env:GOOS   = '${{ matrix.goos }}'
+          $env:GOARCH = '${{ matrix.goarch }}'
+          $ldflags = if ('${{ matrix.goos }}' -eq 'windows') { '-s -w -H=windowsgui' } else { '-s -w' }
+          $exe     = if ('${{ matrix.goos }}' -eq 'windows') { 'dist/CodingFire.exe' } else { 'dist/CodingFire' }
+          go build -trimpath -ldflags $ldflags -o $exe .
+          if ($LASTEXITCODE -ne 0) { throw "go build failed (exit $LASTEXITCODE)." }
+          Write-Host ("built {0:N0} bytes" -f (Get-Item $exe).Length)

@@ -37,11 +37,19 @@ tools already write to disk. The faster you burn tokens, the bigger the fire.
 |---|---|
 | Windows 11 / 10 (64-bit) | Nothing - one self-contained `.exe` |
 | Windows 8 / 8.1, Windows 7 SP1 | Use the [C# build](https://github.com/wangsrGit119/codingfire-win) instead |
+| Linux / macOS | **Experimental** - builds are published, but not usable yet |
 
 Go 1.21 dropped Windows 7 and 8 support, so this build is Windows 10 and later.
-It is compiled for `windows/amd64` with `CGO_ENABLED=0` and links no C runtime:
-the binary is fully static, which is why it is ~18 MB rather than the C# build's
-191 KB. Disk is cheap; a missing DLL is not.
+It is compiled with `CGO_ENABLED=0` and links no C runtime: the binary is fully
+static, which is why it is ~18 MB rather than the C# build's 191 KB. Disk is
+cheap; a missing DLL is not.
+
+Linux (`x64`, `arm64`) and macOS (`x64`, `arm64`) zips are attached to every
+release so that the port has somewhere to land, but **they are not usable yet**:
+the platform shims in `internal/ui/win32_other.go`, `internal/core/autostart_other.go`
+and friends are deliberate no-ops, so there is no click-through, no window
+positioning and no autostart off Windows. Windows is the only supported target;
+`windows/arm64` is built and published but has never been run.
 
 ## Download and run
 
@@ -163,8 +171,20 @@ git push origin v1.0.0
 It aborts if `internal/core/version.go` declares a different version than the
 tag. You can also run it by hand from the Actions tab and type the version in.
 
+The workflow verifies once, then builds every target in parallel, then publishes -
+so a platform that stops compiling fails the run *before* anything is attached to
+the release. Targets: `windows/amd64`, `windows/arm64`, `linux/amd64`,
+`linux/arm64`, `darwin/amd64`, `darwin/arm64`, each as a one-file zip.
+
+Each artifact is checked against its own label: the Windows `amd64` binary is run
+and its `--dump` header read back, and the cross-compiled ones are inspected with
+`go version -m` to confirm the recorded `GOOS`/`GOARCH` matches the name they ship
+under, plus a scan for the version literal. `.github/workflows/ci.yml` compiles
+the same matrix on every push, so a break shows up on the commit that caused it
+rather than on the tag.
+
 `release.ps1` does the same work locally, for when you would rather not wait for
-a runner.
+a runner. It only builds the Windows target.
 
 ## Data and privacy
 
