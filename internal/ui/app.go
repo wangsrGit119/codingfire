@@ -212,14 +212,10 @@ func (a *App) Run() {
 			// as soon as OnInit returns, X11 has already mapped it — so doing
 			// both in one pass is what keeps it from ever being seen at
 			// go-gui's default (0,0).
-			probeLog("oninit pre-tweaks  tokens=%d phase=%v intensity=%.4f",
-				a.Fire.TodayTokens, a.Fire.Snapshot().Phase, a.Fire.Snapshot().Intensity)
 			a.applyPlatformTweaks()
 			if a.Settings.FlameVisible && !a.probeHidden {
 				SetWindowVisible(a.hwnd, true)
 			}
-			probeLog("oninit post-visible tokens=%d phase=%v intensity=%.4f",
-				a.Fire.TodayTokens, a.Fire.Snapshot().Phase, a.Fire.Snapshot().Intensity)
 
 			// If the saved state says hidden, take the native window down
 			// again. It stays alive so the tray's Show action can bring it
@@ -239,8 +235,6 @@ func (a *App) Run() {
 				fn()
 			})
 			a.Monitor.Start()
-			probeLog("oninit post-start   tokens=%d phase=%v intensity=%.4f",
-				a.Fire.TodayTokens, a.Fire.Snapshot().Phase, a.Fire.Snapshot().Intensity)
 		},
 	}
 	if a.bitmapOverlays {
@@ -352,15 +346,6 @@ func (a *App) flameView(w *gui.Window) gui.View {
 		return gui.Column(gui.ContainerCfg{Sizing: gui.FillFill, SizeBorder: gui.NoBorder})
 	}
 	a.renderFlame()
-
-	probeFlameCalls++
-	psnap := a.Fire.Snapshot()
-	probeLog("flameView #%d phase=%v intensity=%.4f tier=%v ember=%.4f",
-		probeFlameCalls, psnap.Phase, psnap.Intensity, psnap.Tier, psnap.EmberHeat)
-	if probeFlameCalls <= 4 || (probeFlameCalls >= 200 && probeFlameCalls <= 300 && probeFlameCalls%20 == 0) {
-		probeDumpBuffer(fmt.Sprintf("/tmp/cf-seq-%03d.png", probeFlameCalls),
-			a.panelPhysW, a.panelPhysH, a.Renderer.Pix())
-	}
 
 	a.mu.Lock()
 	pw, ph := a.panelPhysW, a.panelPhysH

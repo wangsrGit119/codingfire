@@ -123,6 +123,17 @@ func TestHoverCardContentFitsItsSurface(t *testing.T) {
 		{TodayTokens: 0, Hourly: emptyHours()},
 		{TodayTokens: 0, Hourly: emptyHours(), HasUpdated: true},
 	}
+	// Exercise each supported source count, including the footer and chart.
+	// Checking only a single source misses overflow caused by stacked rows.
+	var rows []HoverRow
+	for _, source := range core.UsageSourcesAll {
+		rows = append(rows, HoverRow{Source: source, Tokens: 1000})
+		models = append(models, HoverModel{
+			TodayTokens: len(rows) * 1000,
+			Rows:        append([]HoverRow(nil), rows...),
+			Hourly:      busyHours(), HasUpdated: true,
+		})
+	}
 	for i, model := range models {
 		height := int(math.Ceil(float64(hoverCardHeight(model))))
 		w := gui.NewTestWindow(gui.WindowCfg{Width: hoverCardWidth, Height: height})
@@ -133,6 +144,16 @@ func TestHoverCardContentFitsItsSurface(t *testing.T) {
 			t.Fatalf("model %d: no card", i)
 		}
 		bottom := card.Shape.Y
+		var checkBounds func(*gui.Layout)
+		checkBounds = func(node *gui.Layout) {
+			if node.Shape != nil && node.Shape.Y+node.Shape.Height > float32(height-hoverCardPad-hoverCardBorder) && node != card {
+				t.Errorf("model %d: descendant ends at %.1f beyond card content boundary %d", i, node.Shape.Y+node.Shape.Height, height-hoverCardPad-hoverCardBorder)
+			}
+			for j := range node.Children {
+				checkBounds(&node.Children[j])
+			}
+		}
+		checkBounds(card)
 		for j := range card.Children {
 			if c := &card.Children[j]; c.Shape != nil {
 				if b := c.Shape.Y + c.Shape.Height; b > bottom {

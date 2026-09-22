@@ -22,7 +22,7 @@ import (
 const (
 	hoverCardWidth  = 216
 	hoverCardPad    = 13
-	hoverCardRowH   = 19
+	hoverCardRowH   = 24
 	hoverCardRadius = 12
 
 	// These are logical pixels. C# used point sizes (8pt, 19pt, 8.6pt,
@@ -48,11 +48,11 @@ const (
 	hoverCardBigH    = 35
 	hoverCardBigGap  = 10
 	hoverCardRowsGap = 6
-	hoverCardFooterH = 15
+	hoverCardFooterH = 24
 	// Text glyphs have a little descent beyond their nominal line box. Keep a
 	// small bottom reserve so the last source row and the updated footer remain
 	// visible on every backend, including macOS CoreText.
-	hoverCardBottomSafeH = 8
+	hoverCardBottomSafeH = 40
 	// The root's 1 px border sits inside its padding, so it costs a pixel at
 	// each end of the card.
 	hoverCardBorder = 1
