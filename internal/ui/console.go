@@ -60,27 +60,30 @@ const consoleOpenTimeout = 3 * time.Second
 
 // Console window geometry, in logical pixels.
 //
+// Both numbers are measured, not guessed: `ctprobe layout` renders each tab
+// headlessly at a given window size and reports whether go-gui decided to show
+// either bar.
+//
 // The width is not a taste decision. The stats tab lays two fixed-width columns
 // side by side, and go-gui has no flex-with-max layout, so the row's intrinsic
-// width is the sum of the two columns' fixed card widths — 1066 px, the same in
-// all four UI languages because it comes from the bar geometry rather than from
-// any text. A window narrower than that gives the tab a horizontal scrollbar,
-// which is exactly what a console that opens on the stats tab must not have;
-// the 1160 leaves ~40 px for the source paths, whose length is data-dependent.
+// width is the sum of the two columns' fixed card widths — the same in all four
+// UI languages, because it comes from the bar geometry rather than from any
+// text. A window narrower than that gives the tab a horizontal scrollbar, which
+// is exactly what a console that opens on the stats tab must not have; the 44
+// is the body's own inset.
 //
-// Measured, not guessed: `ctprobe layout` renders each tab headlessly at a
-// given window size and reports whether go-gui decided to show either bar.
-// The height is the same kind of measurement: the stats tab stacks four
-// sections in its right-hand column and a fifth (the per-model split) once any
-// source has named a model, and 760 left it 11 px short — which shows up as a
-// vertical scrollbar on the tab the console opens on. 820 covers the sections
-// at their row caps; heavier data scrolls the tab, which is what a scrollable
-// region is for.
+// The height has to cover the stats tab's tallest state: the two columns plus
+// the recent-event card stacked below them, with statsBottomGap under it.
+// Anything shorter opens the console on a tab that is already scrolled.
+// Heavier data still scrolls the tab, which is what a scrollable region is for.
 const (
 	consoleWindowW  = 960
-	consoleWindowH  = 680
+	consoleWindowH  = 740
 	statsColumnsGap = 6
 	statsColumnW    = (consoleWindowW - 44 - statsColumnsGap) / 2
+	// statsBodyW is the stats tab's content width. The two-column grid and the
+	// recent-event card below it both take it, so their outer edges line up.
+	statsBodyW = consoleWindowW - 44
 )
 
 // OpenConsole shows the console, or raises the open one and switches tab.
@@ -333,7 +336,48 @@ const (
 	statBarRadius = 4
 	hourChartH    = 72
 	hourBarW      = 15
+
+	// The recent-event table. These are the natural widths each column needs to
+	// read; the row is then widened to span the card by recentColW.
+	recentTimeW   = 58
+	recentSourceW = 124
+	recentModelW  = 110
+	recentTokensW = 88
+	recentDetailW = 120
+	recentRowGap  = 8
+	recentRowPad  = 1
+	// recentRowLimit is how many of the day's latest events the card lists.
+	recentRowLimit = 6
+	// recentModelRunes is the character budget that fits the model column once
+	// recentColW has widened it. Names longer than this are truncated, so a
+	// verbose model id cannot push the token and detail columns out of the card.
+	recentModelRunes = 28
+
+	// statsRecentW is the recent-event card's outer width: the same as the
+	// two-column grid above it, so the tab reads as one aligned block.
+	statsRecentW = statsBodyW
+
+	// recentNaturalW is what the five columns need at those natural widths, and
+	// recentTableW is what the card actually gives them: its inner width less
+	// the row's own padding and the gaps between columns. The 2 is the card's
+	// own 1 px border on each side.
+	recentNaturalW = recentTimeW + recentSourceW + recentModelW + recentTokensW + recentDetailW
+	recentTableW   = statsRecentW - statCardPad*2 - 2 - recentRowPad*2 - recentRowGap*4
+	recentSlackW   = recentTableW - recentNaturalW
+
+	// statsBottomGap is the breathing room under the last card, so the pane
+	// does not end flush against the window edge.
+	statsBottomGap = 10
 )
+
+// recentColW widens a column's natural width by its share of the card's slack,
+// in proportion to that natural width. Every column grows by the same factor,
+// so the row spans the card instead of leaving one wide gap in the middle where
+// a single flexible column used to absorb all of it. Integer division leaves a
+// couple of pixels over; the row is FillFit, so it simply ends up flush.
+func recentColW(natural int) float32 {
+	return float32(natural + recentSlackW*natural/recentNaturalW)
+}
 
 // statsTab renders today's usage: the headline card, the token-class breakdown,
 // the per-source ranking and the hourly timeline.
@@ -388,8 +432,8 @@ func statsTab(s *consoleState) []gui.View {
 
 	// Keep the raw event trail visible below the aggregates. This makes the
 	// numbers auditable without exposing prompts or source file contents. It
-	// gets the full console width so its time, source, model and detail columns
-	// remain readable instead of being squeezed into the right column.
+	// sits below the two columns at statsRecentW rather than spanning the full
+	// console width, which left the columns stranded far apart.
 	recent := recentEventRows(a)
 
 	if !a.Monitor.HasAnySource() {
@@ -397,7 +441,7 @@ func statsTab(s *consoleState) []gui.View {
 	}
 	out := []gui.View{
 		gui.Row(gui.ContainerCfg{
-			ID: "console.stats.columns", Sizing: gui.FixedFit, Width: consoleWindowW - 44, Spacing: gui.SomeF(statsColumnsGap),
+			ID: "console.stats.columns", Sizing: gui.FixedFit, Width: statsBodyW, Spacing: gui.SomeF(statsColumnsGap),
 			HAlign: gui.HAlignStart,
 			VAlign: gui.VAlignTop,
 			Content: []gui.View{
@@ -409,7 +453,7 @@ func statsTab(s *consoleState) []gui.View {
 	if len(recent) > 0 {
 		out = append(out,
 			statsSectionHeader(core.T("stats.recent"), theme),
-			statsCard(recent),
+			statsCardWidth(recent, statsRecentW),
 		)
 	}
 
@@ -423,7 +467,11 @@ func statsTab(s *consoleState) []gui.View {
 				Overflow: gui.ScrollbarAuto,
 			},
 			Spacing: gui.SomeF(3),
-			Padding: gui.NoPadding,
+			// A bottom inset, so the last card does not end flush against the
+			// window edge. It counts against the viewport rather than adding
+			// to the content, which is why consoleWindowH is measured with it
+			// in place.
+			Padding: gui.NewPadding(0, 0, statsBottomGap, 0),
 			Content: out,
 		}),
 	}
@@ -552,8 +600,8 @@ func recentEventRows(a *App) []gui.View {
 	if len(events) == 0 {
 		return nil
 	}
-	if len(events) > 5 {
-		events = events[len(events)-5:]
+	if len(events) > recentRowLimit {
+		events = events[len(events)-recentRowLimit:]
 	}
 	rows := make([]gui.View, 0, len(events))
 	for i := len(events) - 1; i >= 0; i-- {
@@ -584,14 +632,14 @@ func recentEventRows(a *App) []gui.View {
 		}
 		rows = append(rows, gui.Row(gui.ContainerCfg{
 			Sizing:  gui.FillFit,
-			Spacing: gui.SomeF(8),
-			Padding: gui.PadAll(1),
+			Spacing: gui.SomeF(recentRowGap),
+			Padding: gui.PadAll(recentRowPad),
 			Content: []gui.View{
-				cell(58, styled(timeText, statStyle(11, statFaint, false))),
-				cell(124, styled(source, statStyle(12, statDim, false))),
-				flexCell(styled(truncateRunes(model, 18), statStyle(11, statFaint, false))),
-				cell(88, rightAligned(core.Compact(int64(e.Tokens)), statStyle(12, statBright, true))),
-				cell(120, rightAligned(breakdown, statStyle(10, statFaint, false))),
+				cell(recentColW(recentTimeW), styled(timeText, statStyle(11, statFaint, false))),
+				cell(recentColW(recentSourceW), styled(source, statStyle(12, statDim, false))),
+				cell(recentColW(recentModelW), styled(truncateRunes(model, recentModelRunes), statStyle(11, statFaint, false))),
+				cell(recentColW(recentTokensW), rightAligned(core.Compact(int64(e.Tokens)), statStyle(12, statBright, true))),
+				cell(recentColW(recentDetailW), rightAligned(breakdown, statStyle(10, statFaint, false))),
 			},
 		}))
 	}
@@ -778,10 +826,11 @@ func sourceBars(bySource map[core.UsageSource]int) []gui.View {
 
 // modelBars renders today's tokens per model, longest bar first.
 //
-// One accent colour for every row, unlike the per-source bars: a model is not
-// an identity the app can colour-code, and the flame is single-coloured by
-// design anyway. Rows are capped because a machine that has tried many models
-// would otherwise push the card past the window.
+// Same row shape as the per-source bars above, down to the leading dot, so the
+// two lists read as one visual language. Only the colour differs: a model is not
+// an identity the app can colour-code, so every row takes the single amber the
+// flame itself uses. Rows are capped because a machine that has tried many
+// models would otherwise push the card past the window.
 func modelBars(byModel map[string]int) []gui.View {
 	type entry struct {
 		model  string
@@ -810,16 +859,20 @@ func modelBars(byModel map[string]int) []gui.View {
 
 	out := make([]gui.View, 0, len(list))
 	for _, e := range list {
+		dotStyle := statStyle(12, statBright, false)
+		dotStyle.Color = statAmber
+
 		out = append(out, gui.Row(gui.ContainerCfg{
 			Sizing:  gui.FillFit,
 			Spacing: gui.SomeF(8),
 			Padding: gui.NoPadding,
 			Content: []gui.View{
+				cell(16, gui.Text(gui.TextCfg{Text: "●", TextStyle: dotStyle})),
 				cell(statNameW, gui.Text(gui.TextCfg{
 					Text:      truncateRunes(e.model, statNameRunes),
 					TextStyle: statStyle(12, statDim, false),
 				})),
-				statBar(float64(e.tokens)/float64(max), statBarW, statAmber, statTrack),
+				statBar(float64(e.tokens)/float64(max), statBarW, dotStyle.Color, statTrack),
 				cell(statValueW, rightAligned(
 					core.Compact(int64(e.tokens)), statStyle(12, statBright, false))),
 			},
@@ -1044,20 +1097,14 @@ func hourTokens(hours []core.HourlyUsage, hour int) int {
 	return 0
 }
 
-// statsCard wraps content in the warm dark glass panel the console's own stats
-// views use, so they read as CodingFire's HUD rather than as theme chrome.
-func statsCard(content []gui.View) gui.View {
-	return statsCardWidth(content, 0)
-}
-
+// statsCardWidth wraps content in the warm dark glass panel the console's own
+// stats views use, so they read as CodingFire's HUD rather than as theme
+// chrome. width pins the outer width — always explicit, because a card left to
+// size itself to its intrinsic content drifts with the data.
 func statsCardWidth(content []gui.View, width int) gui.View {
-	sizing := gui.FillFit
-	if width > 0 {
-		sizing = gui.FixedFit
-	}
 	return gui.Column(gui.ContainerCfg{
 		ID:          "console.stats.card",
-		Sizing:      sizing,
+		Sizing:      gui.FixedFit,
 		Width:       float32(width),
 		Padding:     gui.PadAll(statCardPad),
 		Spacing:     gui.SomeF(statCardGap),
