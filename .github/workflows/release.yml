@@ -262,6 +262,22 @@ jobs:
   # binary that does not panic on launch - built without cgo, darwin selects
   # gui/backend/run_default.go, whose RunApp panics with "no native backend
   # available".
+  #
+  # Each leg therefore needs a runner whose *architecture* matches the artifact,
+  # which is why the runner is in the matrix rather than fixed: a cgo build for
+  # amd64 on an arm64 host does not produce a real Intel binary.
+  #
+  # The labels are pinned to specific images on purpose. macos-latest is arm64,
+  # and macos-13 - the label this job used until v1.1.7 - was retired on
+  # 2025-12-04, which does not fail the job: it leaves it queued forever, and
+  # because publish needs every build leg, the release is then never created.
+  # If a queued macOS leg ever shows up again, check the label against
+  # https://github.com/actions/runner-images before anything else.
+  #
+  # macos-15-intel is the standard-runner Intel image GitHub added as macos-13's
+  # replacement (the -large labels need a larger-runner plan). Note that Intel
+  # macOS goes away entirely when the macOS 15 image retires in Fall 2027, so
+  # this leg has a known end date.
   macos:
     needs: verify
     runs-on: ${{ matrix.runner }}
@@ -269,8 +285,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goarch: amd64, runner: macos-13, asset: CodingFire-macos-x64 }
-          - { goarch: arm64, runner: macos-14, asset: CodingFire-macos-arm64 }
+          - { goarch: amd64, runner: macos-15-intel, asset: CodingFire-macos-x64 }
+          - { goarch: arm64, runner: macos-15, asset: CodingFire-macos-arm64 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
