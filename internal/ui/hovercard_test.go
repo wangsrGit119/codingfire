@@ -146,8 +146,8 @@ func TestHoverCardContentFitsItsSurface(t *testing.T) {
 		bottom := card.Shape.Y
 		var checkBounds func(*gui.Layout)
 		checkBounds = func(node *gui.Layout) {
-			if node.Shape != nil && node.Shape.Y+node.Shape.Height > float32(height-hoverCardPad-hoverCardBorder) && node != card {
-				t.Errorf("model %d: descendant ends at %.1f beyond card content boundary %d", i, node.Shape.Y+node.Shape.Height, height-hoverCardPad-hoverCardBorder)
+			if node.Shape != nil && node.Shape.Y+node.Shape.Height > float32(height-hoverCardBottomPad-hoverCardBorder) && node != card {
+				t.Errorf("model %d: descendant ends at %.1f beyond card content boundary %d", i, node.Shape.Y+node.Shape.Height, height-hoverCardBottomPad-hoverCardBorder)
 			}
 			for j := range node.Children {
 				checkBounds(&node.Children[j])
@@ -162,9 +162,9 @@ func TestHoverCardContentFitsItsSurface(t *testing.T) {
 			}
 		}
 		// The content has to end inside the surface, border and padding included.
-		if room := float32(height) - bottom; room < float32(hoverCardPad+hoverCardBorder) {
+		if room := float32(height) - bottom; room < float32(hoverCardBottomPad+hoverCardBorder) {
 			t.Errorf("model %d: content ends at %.1f in a %d px card, leaving %.1f px of the %.1f px bottom inset",
-				i, bottom, height, room, float32(hoverCardPad+hoverCardBorder))
+				i, bottom, height, room, float32(hoverCardBottomPad+hoverCardBorder))
 		}
 	}
 }

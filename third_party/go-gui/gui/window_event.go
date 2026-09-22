@@ -233,7 +233,10 @@ func (w *Window) eventAllowed(e *Event) bool {
 	}
 	// A window exit must clear hover in a background window too, or
 	// it comes back to the foreground still lit.
-	return e.Type == EventFocused ||
+	// Native geometry changes also apply to non-activating overlays and
+	// background windows. Dropping them leaves layout at the old dimensions.
+	return e.Type == EventResized ||
+		e.Type == EventFocused ||
 		e.Type == EventMouseLeave ||
 		e.Type == EventMouseScroll ||
 		e.Type == EventTouchesBegan ||

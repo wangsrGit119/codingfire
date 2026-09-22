@@ -1246,7 +1246,10 @@ func (a *App) hoverCardPosition(cardLogH int) (int, int) {
 		return hoverParkedX, hoverParkedY
 	}
 
-	scale := fire.DpiScale
+	scale := WindowDPIScale(a.hoverHwndFor())
+	if scale < 1 {
+		scale = fire.DpiScale
+	}
 	cardW := int(ceilF(hoverCardWidth * scale))
 	cardH := int(ceilF(float64(cardLogH) * scale))
 	gap := int(ceilF(hoverGap * scale))

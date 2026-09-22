@@ -348,12 +348,14 @@ func statsTab(s *consoleState) []gui.View {
 	rolling := rollingUsage(a)
 
 	left := []gui.View{
+		statsHeadCard(a, total, theme),
 		statsSectionHeader(core.T("stats.last7"), theme),
 		statsColumnCard(rollingDailyRows(rolling)),
 		statsSectionHeader(core.T("stats.timeline"), theme),
 		todayTimeline(hourly),
 	}
 	right := []gui.View{
+		statsColumnCard(rollingSummaryRows(rolling)),
 		statsSectionHeader(core.T("stats.breakdown"), theme),
 		statsColumnCard(breakdownRows(breakdown, total)),
 	}
@@ -385,39 +387,30 @@ func statsTab(s *consoleState) []gui.View {
 	// does not disappear when today's source totals are temporarily empty.
 
 	// Keep the raw event trail visible below the aggregates. This makes the
-	// numbers auditable without exposing prompts or source file contents.
-	if recent := recentEventRows(a); len(recent) > 0 {
-		right = append(right,
-			statsSectionHeader(core.T("stats.recent"), theme),
-			statsColumnCard(recent),
-		)
-	}
+	// numbers auditable without exposing prompts or source file contents. It
+	// gets the full console width so its time, source, model and detail columns
+	// remain readable instead of being squeezed into the right column.
+	recent := recentEventRows(a)
 
 	if !a.Monitor.HasAnySource() {
 		left = append(left, muted(core.T("hover.none"), theme))
 	}
 	out := []gui.View{
 		gui.Row(gui.ContainerCfg{
-			ID:      "console.stats.firstrow",
-			Sizing:  gui.FixedFit,
-			Width:   consoleWindowW - 44,
-			Spacing: gui.SomeF(statsColumnsGap),
-			HAlign:  gui.HAlignStart,
-			VAlign:  gui.VAlignTop,
-			Content: []gui.View{
-				statsHeadCard(a, total, theme),
-				statsColumnCard(rollingSummaryRows(rolling)),
-			},
-		}),
-		gui.Row(gui.ContainerCfg{
 			ID: "console.stats.columns", Sizing: gui.FixedFit, Width: consoleWindowW - 44, Spacing: gui.SomeF(statsColumnsGap),
 			HAlign: gui.HAlignStart,
 			VAlign: gui.VAlignTop,
 			Content: []gui.View{
-				gui.Column(gui.ContainerCfg{ID: "console.stats.left", Sizing: gui.FixedFit, Width: statsColumnW, HAlign: gui.HAlignLeft, Spacing: gui.SomeF(3), Content: left}),
-				gui.Column(gui.ContainerCfg{ID: "console.stats.right", Sizing: gui.FixedFit, Width: statsColumnW, HAlign: gui.HAlignLeft, Spacing: gui.SomeF(3), Content: right}),
+				gui.Column(gui.ContainerCfg{ID: "console.stats.left", Sizing: gui.FixedFit, Width: statsColumnW, HAlign: gui.HAlignLeft, Spacing: gui.SomeF(3), Padding: gui.NoPadding, Content: left}),
+				gui.Column(gui.ContainerCfg{ID: "console.stats.right", Sizing: gui.FixedFit, Width: statsColumnW, HAlign: gui.HAlignLeft, Spacing: gui.SomeF(3), Padding: gui.NoPadding, Content: right}),
 			},
 		}),
+	}
+	if len(recent) > 0 {
+		out = append(out,
+			statsSectionHeader(core.T("stats.recent"), theme),
+			statsCard(recent),
+		)
 	}
 
 	return []gui.View{
@@ -1080,7 +1073,18 @@ func statsCardWidth(content []gui.View, width int) gui.View {
 // their column. Without an explicit width, go-gui sizes the card to its
 // intrinsic content and centers it inside the fixed-width column.
 func statsColumnCard(content []gui.View) gui.View {
-	return statsCardWidth(content, statsColumnW)
+	return gui.Column(gui.ContainerCfg{
+		ID:          "console.stats.card.column",
+		Sizing:      gui.FillFit,
+		Padding:     gui.PadAll(statCardPad),
+		Spacing:     gui.SomeF(statCardGap),
+		Radius:      gui.SomeF(hoverCardRadius),
+		Color:       statCardBG,
+		ColorBorder: statCardBorder,
+		SizeBorder:  gui.SomeF(1),
+		HAlign:      gui.HAlignLeft,
+		Content:     content,
+	})
 }
 
 // derefInt reads an optional token count; nil means the source did not report

@@ -44,15 +44,12 @@ const (
 	// Both renderers read them, so the Windows painter's DrawText rects grew by
 	// the same 8 px. That is the point: the card is one picture drawn two ways,
 	// and only the go-gui one can silently overflow.
-	hoverCardTitleH  = 18
-	hoverCardBigH    = 35
-	hoverCardBigGap  = 10
-	hoverCardRowsGap = 6
-	hoverCardFooterH = 24
-	// Text glyphs have a little descent beyond their nominal line box. Keep a
-	// small bottom reserve so the last source row and the updated footer remain
-	// visible on every backend, including macOS CoreText.
-	hoverCardBottomSafeH = 40
+	hoverCardTitleH    = 18
+	hoverCardBigH      = 35
+	hoverCardBigGap    = 10
+	hoverCardRowsGap   = 6
+	hoverCardFooterH   = 15
+	hoverCardBottomPad = 8
 	// The root's 1 px border sits inside its padding, so it costs a pixel at
 	// each end of the card.
 	hoverCardBorder = 1
@@ -95,7 +92,7 @@ var (
 // Both renderers size their surface from this, so a chart drawn at a height the
 // function did not account for would be clipped rather than merely cramped.
 func hoverCardHeight(model HoverModel) float32 {
-	box := float32(2*hoverCardBorder + 2*hoverCardPad + hoverCardTitleH + hoverCardBigH + hoverCardBigGap)
+	box := float32(2*hoverCardBorder + hoverCardPad + hoverCardBottomPad + hoverCardTitleH + hoverCardBigH + hoverCardBigGap)
 	if hoverChartVisible(model) {
 		box += hoverChartBlockH
 	}
@@ -104,9 +101,9 @@ func hoverCardHeight(model HoverModel) float32 {
 		footer = hoverCardFooterH
 	}
 	if len(model.Rows) == 0 {
-		return box + hoverCardRowH*2 + footer + hoverCardBottomSafeH
+		return box + hoverCardRowH*2 + footer
 	}
-	return box + float32(len(model.Rows))*hoverCardRowH + hoverCardRowsGap + footer + hoverCardBottomSafeH
+	return box + float32(len(model.Rows))*hoverCardRowH + hoverCardRowsGap + footer
 }
 
 // hoverChartBlockH is everything the mini timeline costs: the plot, its hour
@@ -272,8 +269,14 @@ func HoverCardView(model HoverModel) []gui.View {
 	}
 
 	if model.HasUpdated {
+		// Flexible space keeps the footer at the bottom if the surface grows.
+		body = append(body, gui.Column(gui.ContainerCfg{
+			Sizing: gui.FillFill, Padding: gui.NoPadding,
+			SizeBorder: gui.SomeF(0), Color: gui.ColorTransparent,
+		}))
 		body = append(body, gui.Row(gui.ContainerCfg{
 			Sizing:  gui.FillFixed,
+			ID:      "hovercard.footer",
 			Height:  hoverCardFooterH,
 			Padding: gui.NoPadding,
 			Content: []gui.View{gui.Text(gui.TextCfg{
@@ -283,13 +286,12 @@ func HoverCardView(model HoverModel) []gui.View {
 			})},
 		}))
 	}
-	body = append(body, hoverSpacer(hoverCardBottomSafeH))
 
 	return []gui.View{
 		gui.Column(gui.ContainerCfg{
 			ID:      "hovercard.root",
 			Sizing:  gui.FillFill,
-			Padding: gui.PadAll(hoverCardPad),
+			Padding: gui.NewPadding(hoverCardPad, hoverCardPad, hoverCardBottomPad, hoverCardPad),
 			Spacing: gui.SomeF(0),
 			Radius:  gui.SomeF(hoverCardRadius),
 			// C# uses Color.FromArgb(236, 30, 26, 24). Keep the same

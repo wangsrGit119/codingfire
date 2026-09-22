@@ -138,6 +138,7 @@ func (p *nativeHoverPainter) draw(model HoverModel, scale float64) image.Image {
 		y += hoverCardRowsGap
 	}
 	if model.HasUpdated {
+		y = float64(hoverCardHeight(model)) - hoverCardBorder - hoverCardBottomPad - hoverCardFooterH
 		p.text(core.T("hover.updated")+" "+model.UpdatedAt.Format("15:04"), left, y, content, hoverCardFooterH, hoverCardFooterSize, 110, false, 0)
 	}
 	return p.img
