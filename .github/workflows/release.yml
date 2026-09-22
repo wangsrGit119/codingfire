@@ -264,13 +264,13 @@ jobs:
   # available".
   macos:
     needs: verify
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { goarch: amd64, asset: CodingFire-macos-x64 }
-          - { goarch: arm64, asset: CodingFire-macos-arm64 }
+          - { goarch: amd64, runner: macos-13, asset: CodingFire-macos-x64 }
+          - { goarch: arm64, runner: macos-14, asset: CodingFire-macos-arm64 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -286,6 +286,7 @@ jobs:
           CGO_ENABLED: '1'
           GOOS: darwin
           GOARCH: ${{ matrix.goarch }}
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: |
           mkdir -p dist/CodingFire.app/Contents/MacOS
           go build -trimpath -ldflags '-s -w' -o dist/CodingFire.app/Contents/MacOS/CodingFire .
@@ -302,6 +303,13 @@ jobs:
             <key>LSUIElement</key><true/>
           </dict></plist>
           PLIST
+          file dist/CodingFire.app/Contents/MacOS/CodingFire
+          if [[ '${{ matrix.goarch }}' == 'amd64' ]]; then
+            file dist/CodingFire.app/Contents/MacOS/CodingFire | grep -q 'x86_64'
+          else
+            file dist/CodingFire.app/Contents/MacOS/CodingFire | grep -q 'arm64'
+          fi
+          otool -l dist/CodingFire.app/Contents/MacOS/CodingFire | grep -A3 LC_BUILD_VERSION
           ls -l dist/CodingFire.app/Contents/MacOS/CodingFire
 
       # --dump is headless, so unlike the GUI it can be run on the runner. It
@@ -337,14 +345,19 @@ jobs:
           ver='${{ needs.verify.outputs.version }}'
           asset='${{ matrix.asset }}'
           zip="$asset-v$ver.zip"
+          dmg="$asset-v$ver.dmg"
           zip -q -r "$zip" dist/CodingFire.app
+          hdiutil create -volname CodingFire -srcfolder dist/CodingFire.app -ov -format UDZO "$dmg"
           ls -l "$zip"
+          ls -l "$dmg"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}-v*.zip
+          path: |
+            ${{ matrix.asset }}-v*.zip
+            ${{ matrix.asset }}-v*.dmg
           if-no-files-found: error
 
   publish:
@@ -364,21 +377,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # This job never checks the repo out - it only needs the downloaded
-          # zips - so gh cannot infer the repository from the working directory.
+          # downloaded assets - so gh cannot infer the repository from the working directory.
           # Without -R every gh call dies with "fatal: not a git repository".
           $repo = '${{ github.repository }}'
           $ver = '${{ needs.verify.outputs.version }}'
           $tag = "v$ver"
-          $zips = @(Get-ChildItem -Path assets -Filter *.zip | Sort-Object Name | ForEach-Object { $_.FullName })
-          if ($zips.Count -eq 0) { throw 'no assets were built.' }
-          Write-Host "publishing $($zips.Count) asset(s):"
-          $zips | ForEach-Object { Write-Host ("  " + (Split-Path $_ -Leaf)) }
+          $assets = @(Get-ChildItem -Path assets -File | Where-Object { $_.Extension -in '.zip', '.dmg' } | Sort-Object Name | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) { throw 'no assets were built.' }
+          Write-Host "publishing $($assets.Count) asset(s):"
+          $assets | ForEach-Object { Write-Host ("  " + (Split-Path $_ -Leaf)) }
 
           # The asset list is generated rather than written out, so the notes can
           # never advertise a platform that failed to build. It is joined into a
           # single string first: as a bare array element inside the @() literal it
           # survives as one object and -join renders it as "System.Object[]".
-          $bullets = (($zips | ForEach-Object { '- `' + (Split-Path $_ -Leaf) + '`' }) -join "`n")
+          $bullets = (($assets | ForEach-Object { '- `' + (Split-Path $_ -Leaf) + '`' }) -join "`n")
           $notes = @(
             'CodingFire - a campfire overlay that shows how hard your local AI tools are working.',
             '',
@@ -403,13 +416,13 @@ jobs:
           gh release view $tag -R $repo 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             Write-Host "release $tag already exists - replacing assets"
-            gh release upload $tag $zips -R $repo --clobber
+            gh release upload $tag $assets -R $repo --clobber
             if ($LASTEXITCODE -ne 0) { throw "gh release upload failed (exit $LASTEXITCODE)." }
             # Notes are regenerated on every run, so re-running the workflow after
             # adding a platform cannot leave the old platform list behind.
             gh release edit $tag -R $repo --title "CodingFire $tag" --notes $notes
           } else {
-            gh release create $tag $zips -R $repo --title "CodingFire $tag" --notes $notes --target $env:GITHUB_SHA
+            gh release create $tag $assets -R $repo --title "CodingFire $tag" --notes $notes --target $env:GITHUB_SHA
           }
           if ($LASTEXITCODE -ne 0) { throw "gh failed (exit $LASTEXITCODE)." }
           Write-Host "published $tag"

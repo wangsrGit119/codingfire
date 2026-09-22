@@ -149,7 +149,7 @@ echo "vetting  : ./..."
 export CGO_LDFLAGS="${CGO_LDFLAGS:-} -Wl,-no_warn_duplicate_libraries"
 # ---------------------------------------------------------------------------
 build_arch() { # arch outfile
-    ( cd "$root" && CGO_ENABLED=1 GOARCH="$1" go build -trimpath -ldflags "$ldflags" -o "$2" . )
+    ( cd "$root" && CGO_ENABLED=1 GOARCH="$1" MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}" go build -trimpath -ldflags "$ldflags" -o "$2" . )
 }
 
 mkdir -p "$dist"
