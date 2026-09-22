@@ -239,7 +239,7 @@ func encodeShortcut(s gui.Shortcut) (C.char, C.int) {
 // flattenTrayItems converts tray menu items into a flat C array.
 func flattenTrayItems(
 	items []gui.NativeMenuItemCfg,
-) (cItems []C.NativeMenuItemC, cleanup func()) {
+) (cItems []C.NativeMenuItemC, topCount int, cleanup func()) {
 	var freeList []*C.char
 
 	cstr := func(s string) *C.char {
@@ -254,6 +254,7 @@ func flattenTrayItems(
 	cItems = make([]C.NativeMenuItemC, 0,
 		countItems(items))
 	flattenItems(items, &cItems, cstr)
+	topCount = len(items)
 
 	cleanup = func() {
 		for _, p := range freeList {
@@ -331,7 +332,7 @@ func ClearMenubar() {
 func CreateSystemTray(
 	cfg gui.SystemTrayCfg, actionCb func(string),
 ) (int, error) {
-	cItems, cleanup := flattenTrayItems(cfg.Menu)
+	cItems, topCount, cleanup := flattenTrayItems(cfg.Menu)
 	defer cleanup()
 
 	var iconPtr unsafe.Pointer
@@ -355,7 +356,7 @@ func CreateSystemTray(
 	trayID := int(C.nativemenuCreateTray(
 		iconPtr, iconLen,
 		cTooltip,
-		itemsPtr, C.int(len(cItems))))
+		itemsPtr, C.int(len(cItems)), C.int(topCount)))
 
 	mu.Lock()
 	trayActionCbs[trayID] = actionCb
@@ -366,7 +367,7 @@ func CreateSystemTray(
 
 // UpdateSystemTray updates an existing tray entry.
 func UpdateSystemTray(id int, cfg gui.SystemTrayCfg) {
-	cItems, cleanup := flattenTrayItems(cfg.Menu)
+	cItems, topCount, cleanup := flattenTrayItems(cfg.Menu)
 	defer cleanup()
 
 	var iconPtr unsafe.Pointer
@@ -390,7 +391,7 @@ func UpdateSystemTray(id int, cfg gui.SystemTrayCfg) {
 	C.nativemenuUpdateTray(C.int(id),
 		iconPtr, iconLen,
 		cTooltip,
-		itemsPtr, C.int(len(cItems)))
+		itemsPtr, C.int(len(cItems)), C.int(topCount))
 }
 
 // RemoveSystemTray removes a tray icon.

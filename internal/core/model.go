@@ -355,8 +355,9 @@ func TierFromIntensity(intensity float64) FireTier {
 // AccentRGB is a normalised RGB triple (each component 0…1).
 type AccentRGB [3]float64
 
-// DefaultFlameAccent is the classic orange the fire falls back to.
-var DefaultFlameAccent = AccentRGB{0.95, 0.55, 0.2}
+// DefaultFlameAccent is the natural campfire base colour: warm orange at the
+// base, with the palette ramp carrying it through red and yellow to white-hot.
+var DefaultFlameAccent = AccentRGB{1.0, 0.45, 0.12}
 
 // FireSnapshot is an immutable-per-frame view of the fire for the renderer.
 //

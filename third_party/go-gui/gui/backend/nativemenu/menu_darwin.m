@@ -424,7 +424,7 @@ static NSImage *imageFromPNG(const void *data, int len) {
 
 int nativemenuCreateTray(const void *iconData, int iconLen,
     const char *tooltip,
-    NativeMenuItemC *items, int itemCount) {
+    NativeMenuItemC *items, int itemCount, int topCount) {
 
     @autoreleasepool {
         if (gTrayItems == nil) {
@@ -452,7 +452,7 @@ int nativemenuCreateTray(const void *iconData, int iconLen,
 
         if (items != NULL && itemCount > 0) {
             NSMenu *menu = buildMenu(@"",
-                items, 0, itemCount, items,
+                items, 0, topCount, items,
                 handler,
                 @selector(menuItemClicked:));
             si.menu = menu;
@@ -467,7 +467,7 @@ int nativemenuCreateTray(const void *iconData, int iconLen,
 void nativemenuUpdateTray(int trayID,
     const void *iconData, int iconLen,
     const char *tooltip,
-    NativeMenuItemC *items, int itemCount) {
+    NativeMenuItemC *items, int itemCount, int topCount) {
 
     @autoreleasepool {
         NSNumber *key = @(trayID);
@@ -485,7 +485,7 @@ void nativemenuUpdateTray(int trayID,
         TrayActionHandler *handler = gTrayHandlers[key];
         if (items != NULL && itemCount > 0) {
             NSMenu *menu = buildMenu(@"",
-                items, 0, itemCount, items,
+                items, 0, topCount, items,
                 handler,
                 @selector(menuItemClicked:));
             si.menu = menu;

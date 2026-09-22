@@ -290,7 +290,7 @@ func DefaultSettings() *Settings {
 		FlameVisible: true,
 		ShowLiveRate: true,
 		AutoStart:    true,
-		FlameColor:   AccentRGB{1.0, 0.45, 0.12},
+		FlameColor:   DefaultFlameAccent,
 		Volume:       0.5,
 		SourceColors: map[string]AccentRGB{},
 	}

@@ -56,7 +56,7 @@ func NewPixelFireEngine(width, height int) *PixelFireEngine {
 		Intensity:         0.4,
 		Tier:              core.TierCrackle,
 		Phase:             core.PhaseFlame,
-		FlameAccent:       core.AccentRGB{0.95, 0.55, 0.2},
+		FlameAccent:       core.DefaultFlameAccent,
 		cachedAccentEpoch: -1,
 	}
 	e.RebuildColorCaches()
@@ -360,7 +360,14 @@ func (e *PixelFireEngine) Render() {
 		e.pix[o] = c.R
 		e.pix[o+1] = c.G
 		e.pix[o+2] = c.B
-		e.pix[o+3] = c.A
+		// Low heat is the translucent edge of the flame, not a solid pixel.
+		// Keeping the hot core opaque preserves brightness while the fringe
+		// blends into the air naturally after the renderer's interpolation.
+		alpha := h * 22
+		if alpha > int(c.A) {
+			alpha = int(c.A)
+		}
+		e.pix[o+3] = byte(alpha)
 	}
 }
 

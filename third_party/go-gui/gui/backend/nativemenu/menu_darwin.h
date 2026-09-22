@@ -36,11 +36,11 @@ void nativemenuClearMenubar(void);
 // System tray management.
 int  nativemenuCreateTray(const void *iconData, int iconLen,
     const char *tooltip,
-    NativeMenuItemC *items, int itemCount);
+    NativeMenuItemC *items, int itemCount, int topCount);
 void nativemenuUpdateTray(int trayID,
     const void *iconData, int iconLen,
     const char *tooltip,
-    NativeMenuItemC *items, int itemCount);
+    NativeMenuItemC *items, int itemCount, int topCount);
 void nativemenuRemoveTray(int trayID);
 
 #endif

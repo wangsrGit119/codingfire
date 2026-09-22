@@ -131,8 +131,8 @@ func (r *CampfireRenderer) Render(snap core.FireSnapshot, pixelScale float64, re
 		}
 	}
 
-	// Simulation stepping: 6fps under reduce-motion, else 12fps.
-	stepFPS := 12.0
+	// Simulation stepping: match the UI's 10fps flame cadence.
+	stepFPS := 10.0
 	if reduceMotion {
 		stepFPS = 6
 	}
@@ -315,49 +315,98 @@ func tierSeed(t core.FireTier) float64 {
 	}
 }
 
-// blitEngine scales the heat-field buffer into the panel with nearest-neighbour
-// sampling.
+// blitEngine scales the heat field with bilinear sampling. The simulation stays
+// intentionally small and fast, while interpolation removes the visible block
+// edges when the flame is enlarged for the overlay window.
 func (r *CampfireRenderer) blitEngine(dx, dy, dw, dh int, alphaMul float64) {
 	src := r.engine.Pix()
 	sw, sh := r.engine.Width, r.engine.Height
 	if dw <= 0 || dh <= 0 {
 		return
 	}
-	sx := float64(sw) / float64(dw)
-	sy := float64(sh) / float64(dh)
-
 	for y := 0; y < dh; y++ {
 		ty := dy + y
 		if ty < 0 || ty >= r.height {
 			continue
 		}
-		syy := int(float64(y) * sy)
-		if syy >= sh {
-			syy = sh - 1
-		}
-		srcRow := syy * sw * 4
-
 		for x := 0; x < dw; x++ {
 			tx := dx + x
 			if tx < 0 || tx >= r.width {
 				continue
 			}
-			sxx := int(float64(x) * sx)
-			if sxx >= sw {
-				sxx = sw - 1
-			}
-
-			so := srcRow + sxx*4
-			a := float64(src[so+3]) / 255
+			rr, gg, bb, a := sampleFlame(src, sw, sh,
+				(float64(x)+0.5)*float64(sw)/float64(dw)-0.5,
+				(float64(y)+0.5)*float64(sh)/float64(dh)-0.5)
 			if a == 0 {
 				continue
 			}
 			if alphaMul < 0.999 {
 				a *= alphaMul
 			}
-			r.blendPixel(tx, ty, float64(src[so])/255, float64(src[so+1])/255, float64(src[so+2])/255, a)
+			r.blendPixel(tx, ty, rr, gg, bb, a)
 		}
 	}
+}
+
+// sampleFlame applies a small 5-tap filter around the bilinear sample. It
+// softens enlarged heat cells without adding another render pass.
+func sampleFlame(src []byte, sw, sh int, x, y float64) (r, g, b, a float64) {
+	points := [...]struct{ dx, dy, weight float64 }{
+		{0, 0, 0.46}, {-0.42, 0, 0.135}, {0.42, 0, 0.135},
+		{0, -0.42, 0.135}, {0, 0.42, 0.135},
+	}
+	for _, p := range points {
+		rr, gg, bb, aa := sampleBilinear(src, sw, sh, x+p.dx, y+p.dy)
+		r += rr * aa * p.weight
+		g += gg * aa * p.weight
+		b += bb * aa * p.weight
+		a += aa * p.weight
+	}
+	if a > 0 {
+		r /= a
+		g /= a
+		b /= a
+	}
+	return r, g, b, a
+}
+
+// sampleBilinear interpolates premultiplied colour and alpha to avoid dark
+// fringes where transparent pixels surround the flame.
+func sampleBilinear(src []byte, sw, sh int, x, y float64) (r, g, b, a float64) {
+	if x < 0 {
+		x = 0
+	} else if x > float64(sw-1) {
+		x = float64(sw - 1)
+	}
+	if y < 0 {
+		y = 0
+	} else if y > float64(sh-1) {
+		y = float64(sh - 1)
+	}
+	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
+	x1, y1 := minInt(x0+1, sw-1), minInt(y0+1, sh-1)
+	fx, fy := x-float64(x0), y-float64(y0)
+	points := [...]struct {
+		x, y   int
+		weight float64
+	}{
+		{x0, y0, (1 - fx) * (1 - fy)}, {x1, y0, fx * (1 - fy)},
+		{x0, y1, (1 - fx) * fy}, {x1, y1, fx * fy},
+	}
+	for _, p := range points {
+		o := (p.y*sw + p.x) * 4
+		pa := float64(src[o+3]) / 255
+		a += pa * p.weight
+		r += float64(src[o]) / 255 * pa * p.weight
+		g += float64(src[o+1]) / 255 * pa * p.weight
+		b += float64(src[o+2]) / 255 * pa * p.weight
+	}
+	if a > 0 {
+		r /= a
+		g /= a
+		b /= a
+	}
+	return r, g, b, a
 }
 
 // blitSprite scales a sprite into the panel with nearest-neighbour sampling,
