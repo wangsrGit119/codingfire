@@ -361,19 +361,14 @@ jobs:
           ver='${{ needs.verify.outputs.version }}'
           asset='${{ matrix.asset }}'
           zip="$asset-v$ver.zip"
-          dmg="$asset-v$ver.dmg"
           zip -q -r "$zip" dist/CodingFire.app
-          hdiutil create -volname CodingFire -srcfolder dist/CodingFire.app -ov -format UDZO "$dmg"
           ls -l "$zip"
-          ls -l "$dmg"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: |
-            ${{ matrix.asset }}-v*.zip
-            ${{ matrix.asset }}-v*.dmg
+          path: ${{ matrix.asset }}-v*.zip
           if-no-files-found: error
 
   publish:
@@ -398,7 +393,7 @@ jobs:
           $repo = '${{ github.repository }}'
           $ver = '${{ needs.verify.outputs.version }}'
           $tag = "v$ver"
-          $assets = @(Get-ChildItem -Path assets -File | Where-Object { $_.Extension -in '.zip', '.dmg' } | Sort-Object Name | ForEach-Object { $_.FullName })
+          $assets = @(Get-ChildItem -Path assets -File | Where-Object { $_.Extension -eq '.zip' } | Sort-Object Name | ForEach-Object { $_.FullName })
           if ($assets.Count -eq 0) { throw 'no assets were built.' }
           Write-Host "publishing $($assets.Count) asset(s):"
           $assets | ForEach-Object { Write-Host ("  " + (Split-Path $_ -Leaf)) }
