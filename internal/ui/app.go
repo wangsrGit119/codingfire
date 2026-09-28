@@ -296,6 +296,7 @@ func (a *App) tickLoop() {
 	// rather than given their own tickers, so there is one loop to reason about.
 	const consoleEvery = int(900 * time.Millisecond / tickInterval)
 	const positionEvery = int(time.Second / tickInterval)
+	const overlayEvery = int(250 * time.Millisecond / tickInterval)
 
 	var n int
 	var frames frameSchedule
@@ -334,7 +335,13 @@ func (a *App) tickLoop() {
 				// startup would otherwise be the only chance it ever got.
 				a.ensurePlaced()
 				a.pollPosition()
+			}
+			if n%overlayEvery == 0 {
+				// Keep both native windows in the front of the topmost band. The
+				// hover card must be guarded after the flame so it cannot be
+				// pushed behind the flame when both are repaired in one pass.
 				a.guardOverlay()
+				a.guardHoverOverlay()
 			}
 		}
 	}
@@ -478,6 +485,51 @@ func (a *App) guardOverlay() {
 	a.mu.Unlock()
 	if !quiet {
 		core.LogWarn("campfire " + reason)
+	}
+}
+
+// guardHoverOverlay keeps the card visible and above the flame while the
+// pointer remains over it. The card is intentionally parked instead of
+// destroyed when hidden, so a native window manager can still minimise it or
+// move it behind another topmost window without the GUI toolkit noticing.
+func (a *App) guardHoverOverlay() {
+	a.mu.Lock()
+	shown := a.hoverShown
+	a.mu.Unlock()
+	if !shown || a.probeHidden || !a.Settings.FlameVisible {
+		return
+	}
+
+	hwnd := a.hoverHwndFor()
+	if hwnd == 0 {
+		return
+	}
+	alive, reason := GuardOverlayWindow(hwnd, true)
+	if !alive {
+		// A recreated native window needs the overlay styles again before the
+		// next show. The next hover refresh will also reapply its position.
+		hwnd = ApplyOverlayWindowStyles(HoverWindowTitle, true, true)
+		if hwnd == 0 {
+			return
+		}
+		a.mu.Lock()
+		a.hoverHwnd = hwnd
+		a.mu.Unlock()
+		SetWindowVisible(hwnd, true)
+		reason = "window was recreated"
+	}
+	if reason == "had been hidden" || reason == "was minimised" || reason == "window was recreated" {
+		// Native visibility and the view state are separate: restore both or
+		// the card can be visible as an empty transparent window indefinitely.
+		model := a.BuildHoverModel()
+		if w := a.hover; w != nil {
+			w.QueueCommand(func(w *gui.Window) {
+				s := gui.State[hoverCardState](w)
+				s.Model = model
+				s.Visible = true
+				w.InvalidateLayout()
+			})
+		}
 	}
 }
 
@@ -1168,6 +1220,12 @@ func (a *App) showHover() {
 	hwnd := a.hoverHwndFor()
 	if hwnd == 0 {
 		return
+	}
+	// A hover card can survive while another topmost window takes the front
+	// position. Raise it before showing it, and keep this after the handle
+	// lookup so a recreated native window receives the styles too.
+	if !ApplyOverlayStyles(hwnd, true, true) {
+		core.LogWarn("could not restore hover card overlay styles")
 	}
 
 	model := a.BuildHoverModel()
